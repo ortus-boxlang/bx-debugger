@@ -104,6 +104,14 @@ This will store the binary under `/src/test/resources/libs` for you to use in yo
 
 Please use the `src/test` folder for your unit tests.  You can either test using TestBox o JUnit if it's Java.
 
+## VSCode Tests
+
+If you will be running tests for modules using the VSCode test explorer, then you need to make sure you remove the `/src/main/resources` line item from the configured class path, if not, the BoxLang core will try loading any service loaders it finds in that class path resolution.
+
+> Please note, this IS ONLY FOR MODULE DEVELOPMENT.
+
+Go to the `Java Projects` panel, click on the 3 dots and click on `Configure Classpath`.  Remove the `/src/main/resources` line item and hit `APPLY SETTINGS` on the bottom left.
+
 ## Github Actions Automation
 
 The github actions will clone, test, package, deploy your module to ForgeBox and the Ortus S3 accounts for API Docs and Artifacts.  So please make sure the following environment variables are set in your repository.
