@@ -196,16 +196,7 @@ test {
     testLogging {
 		showStandardStreams = true
 	}
-	//classpath = classpath.filter { !it.path.contains( "build${File.separator}resources" ) }
-}
-sourceSets {
-    test {
-        resources {
-			// Removes all test resources
-			// We do not want any resources interfering in testing modes
-            resources.setSrcDirs( [] )
-        }
-    }
+	classpath = classpath.filter { !it.path.contains( "build${File.separator}resources" ) }
 }
 
 /**
