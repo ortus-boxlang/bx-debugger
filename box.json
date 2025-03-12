@@ -9,7 +9,7 @@
 		"type": "git",
 		"URL": "https://github.com/ortus-boxlang/@MODULE_SLUG@"
 	},
-	"bugs": "https://github.com/ortus-boxlang/@MODULE_SLUG@/issues",
+	"bugs": "https://ortussolutions.atlassian.net/browse/BLMODULES",
 	"slug": "@MODULE_SLUG@",
 	"shortDescription": "Module template for BoxLang modules",
 	"type": "boxlang-modules",
@@ -26,10 +26,9 @@
 		}
 	],
 	"devDependencies": {
+		"commandbox-boxlang": "*",
 		"commandbox-cfformat": "*",
 		"commandbox-docbox": "*",
-		"commandbox-dotenv": "*",
-		"commandbox-cfconfig": "*",
 		"testbox": "*"
 	},
 	"ignore": [
