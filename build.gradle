@@ -109,6 +109,7 @@ javadoc.finalizedBy( zipJavadocs )
  * This generates the META-INF/services files for the ServiceLoader as part of the `build` task
  */
 serviceLoader {
+	serviceInterface 'ortus.boxlang.runtime.jdbc.drivers.IJDBCDriver'
     serviceInterface 'ortus.boxlang.runtime.bifs.BIF'
     serviceInterface 'ortus.boxlang.runtime.components.Component'
     serviceInterface 'ortus.boxlang.runtime.async.tasks.IScheduler'
