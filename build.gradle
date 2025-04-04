@@ -37,7 +37,7 @@ dependencies {
 	// Until BoxLang is published to Maven Central
 	// Look for it in the local build directory
 	// You must run `./gradle build -x test` in the BoxLang project
-	if ( file( '../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
+	if ( file( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
 		compileOnly files( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
 		testImplementation files( '../../boxlang/build/distributions/boxlang-' + boxlangVersion + '.jar' )
 	} else {
