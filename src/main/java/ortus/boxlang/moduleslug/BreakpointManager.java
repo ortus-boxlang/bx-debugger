@@ -1,10 +1,18 @@
 package ortus.boxlang.moduleslug;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Logger;
 
+import org.eclipse.lsp4j.debug.Breakpoint;
+import org.eclipse.lsp4j.debug.Source;
+import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.StoppedEventArguments;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 
@@ -29,14 +37,63 @@ import com.sun.jdi.request.EventRequestManager;
  */
 public class BreakpointManager {
 
-	private static final Logger					LOGGER					= Logger.getLogger( BreakpointManager.class.getName() );
+	private static final Logger							LOGGER						= Logger.getLogger( BreakpointManager.class.getName() );
 
-	private final VirtualMachine				vm;
-	private final IDebugProtocolClient			client;
-	private final List<BreakpointRequest>		activeBreakpoints		= new CopyOnWriteArrayList<>();
-	private final List<PendingBreakpointInfo>	pendingBreakpoints		= new CopyOnWriteArrayList<>();
-	private volatile boolean					eventProcessingActive	= false;
-	private Thread								eventProcessingThread;
+	private final VirtualMachine						vm;
+	private final IDebugProtocolClient					client;
+	private final List<BreakpointRequest>				activeBreakpoints			= new CopyOnWriteArrayList<>();
+	private final List<PendingBreakpointInfo>			pendingBreakpoints			= new CopyOnWriteArrayList<>();
+	private volatile boolean							eventProcessingActive		= false;
+	private Thread										eventProcessingThread;
+
+	// DAP-level breakpoint storage - organized by file path
+	private final Map<String, List<PendingBreakpoint>>	pendingBreakpointsByFile	= new ConcurrentHashMap<>();
+	private final Map<Integer, PendingBreakpoint>		pendingBreakpointsById		= new ConcurrentHashMap<>();
+	private int											breakpointIdCounter			= 1;
+
+	/**
+	 * Represents a DAP breakpoint that has been requested but not yet verified
+	 */
+	public static class PendingBreakpoint {
+
+		private final Source			source;
+		private final SourceBreakpoint	sourceBreakpoint;
+		private final Breakpoint		breakpoint;
+		private final long				timestamp;
+
+		public PendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
+			this.source				= source;
+			this.sourceBreakpoint	= sourceBreakpoint;
+			this.breakpoint			= breakpoint;
+			this.timestamp			= System.currentTimeMillis();
+		}
+
+		public Source getSource() {
+			return source;
+		}
+
+		public SourceBreakpoint getSourceBreakpoint() {
+			return sourceBreakpoint;
+		}
+
+		public Breakpoint getBreakpoint() {
+			return breakpoint;
+		}
+
+		public long getTimestamp() {
+			return timestamp;
+		}
+
+		public String getFilePath() {
+			return source != null ? source.getPath() : null;
+		}
+
+		@Override
+		public String toString() {
+			return String.format( "PendingBreakpoint[id=%d, file=%s, line=%d, verified=%s]",
+			    breakpoint.getId(), getFilePath(), breakpoint.getLine(), breakpoint.isVerified() );
+		}
+	}
 
 	/**
 	 * Information about a breakpoint that couldn't be set yet because the class isn't loaded
@@ -55,13 +112,22 @@ public class BreakpointManager {
 	public BreakpointManager( VirtualMachine vm, IDebugProtocolClient client ) {
 		this.vm		= vm;
 		this.client	= client;
-		setupClassPrepareEvents();
+
+		// Only setup class prepare events if VM is available
+		if ( vm != null ) {
+			setupClassPrepareEvents();
+		}
 	}
 
 	/**
 	 * Set up class prepare events to catch when classes are loaded
 	 */
 	private void setupClassPrepareEvents() {
+		if ( vm == null ) {
+			LOGGER.warning( "Cannot setup class prepare events - VM is null" );
+			return;
+		}
+
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
 		classPrepareRequest.addClassFilter( "ortus.boxlang.moduleslug.*" );
@@ -75,6 +141,13 @@ public class BreakpointManager {
 	public boolean setBreakpoint( String filePath, int lineNumber ) {
 		try {
 			LOGGER.info( "Attempting to set breakpoint at " + filePath + ":" + lineNumber );
+
+			// If VM is not available, just add to pending breakpoints
+			if ( vm == null ) {
+				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber ) );
+				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
+				return true;
+			}
 
 			// Try to set the breakpoint immediately if the class is already loaded
 			if ( trySetBreakpointOnLoadedClass( filePath, lineNumber ) ) {
@@ -97,6 +170,11 @@ public class BreakpointManager {
 	 * Try to set a breakpoint on an already loaded class
 	 */
 	private boolean trySetBreakpointOnLoadedClass( String filePath, int lineNumber ) {
+		// Require VM to be available
+		if ( vm == null ) {
+			return false;
+		}
+
 		// Get all loaded classes that might contain this file
 		List<ReferenceType> classes = vm.allClasses();
 
@@ -172,6 +250,11 @@ public class BreakpointManager {
 	 * Start processing JDI events (breakpoints, etc.)
 	 */
 	public void startEventProcessing() {
+		if ( vm == null ) {
+			LOGGER.warning( "Cannot start event processing - VM is null" );
+			return;
+		}
+
 		if ( eventProcessingActive ) {
 			return;
 		}
@@ -312,6 +395,11 @@ public class BreakpointManager {
 	 * Clear all active breakpoints
 	 */
 	public void clearAllBreakpoints() {
+		if ( vm == null ) {
+			LOGGER.info( "VM is null, no active breakpoints to clear" );
+			return;
+		}
+
 		EventRequestManager requestManager = vm.eventRequestManager();
 
 		for ( BreakpointRequest request : activeBreakpoints ) {
@@ -327,5 +415,147 @@ public class BreakpointManager {
 	 */
 	public int getActiveBreakpointCount() {
 		return activeBreakpoints.size();
+	}
+
+	/**
+	 * Generate a unique breakpoint ID
+	 */
+	public int generateBreakpointId() {
+		return breakpointIdCounter++;
+	}
+
+	/**
+	 * Store pending breakpoint for later verification
+	 */
+	public void storePendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
+		PendingBreakpoint	pending		= new PendingBreakpoint( source, sourceBreakpoint, breakpoint );
+
+		// Store by file path for quick lookup during verification
+		String				filePath	= normalizeFilePath( source.getPath() );
+		pendingBreakpointsByFile.computeIfAbsent( filePath, k -> new ArrayList<>() ).add( pending );
+
+		// Store by ID for quick lookup when client references breakpoint
+		pendingBreakpointsById.put( breakpoint.getId(), pending );
+
+		LOGGER.info( "Stored pending breakpoint: " + pending );
+	}
+
+	/**
+	 * Get all pending breakpoints for a specific file
+	 */
+	public List<PendingBreakpoint> getPendingBreakpointsForFile( String filePath ) {
+		String normalizedPath = normalizeFilePath( filePath );
+		return pendingBreakpointsByFile.getOrDefault( normalizedPath, new ArrayList<>() );
+	}
+
+	/**
+	 * Get pending breakpoint by ID
+	 */
+	public PendingBreakpoint getPendingBreakpointById( int id ) {
+		return pendingBreakpointsById.get( id );
+	}
+
+	/**
+	 * Remove a pending breakpoint (when verified or deleted)
+	 */
+	public void removePendingBreakpoint( int breakpointId ) {
+		PendingBreakpoint pending = pendingBreakpointsById.remove( breakpointId );
+		if ( pending != null ) {
+			String					filePath		= normalizeFilePath( pending.getFilePath() );
+			List<PendingBreakpoint>	fileBreakpoints	= pendingBreakpointsByFile.get( filePath );
+			if ( fileBreakpoints != null ) {
+				fileBreakpoints.remove( pending );
+				if ( fileBreakpoints.isEmpty() ) {
+					pendingBreakpointsByFile.remove( filePath );
+				}
+			}
+			LOGGER.info( "Removed pending breakpoint: " + pending );
+		}
+	}
+
+	/**
+	 * Clear all pending breakpoints for a file (when setting new breakpoints)
+	 */
+	public void clearPendingBreakpointsForFile( String filePath ) {
+		String					normalizedPath	= normalizeFilePath( filePath );
+		List<PendingBreakpoint>	fileBreakpoints	= pendingBreakpointsByFile.remove( normalizedPath );
+		if ( fileBreakpoints != null ) {
+			for ( PendingBreakpoint pending : fileBreakpoints ) {
+				pendingBreakpointsById.remove( pending.getBreakpoint().getId() );
+			}
+			LOGGER.info( "Cleared " + fileBreakpoints.size() + " pending breakpoints for file: " + normalizedPath );
+		}
+	}
+
+	/**
+	 * Get all pending breakpoints (for debugging/monitoring)
+	 */
+	public Map<String, List<PendingBreakpoint>> getAllPendingBreakpoints() {
+		return new HashMap<>( pendingBreakpointsByFile );
+	}
+
+	/**
+	 * Verify and set pending breakpoints using JDI
+	 */
+	public void verifyAndSetPendingBreakpoints() {
+		int totalPending = pendingBreakpointsById.size();
+		if ( totalPending > 0 ) {
+			LOGGER.info( "Setting " + totalPending + " pending breakpoints" );
+
+			for ( PendingBreakpoint pending : pendingBreakpointsById.values() ) {
+				String	filePath	= pending.getFilePath();
+				int		lineNumber	= pending.getSourceBreakpoint().getLine();
+
+				boolean	success		= setBreakpoint( filePath, lineNumber );
+				if ( success ) {
+					// Mark breakpoint as verified
+					pending.getBreakpoint().setVerified( true );
+					pending.getBreakpoint().setMessage( "Breakpoint verified and set" );
+					LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
+				} else {
+					pending.getBreakpoint().setMessage( "Could not verify breakpoint location" );
+					LOGGER.warning( "Failed to set breakpoint at " + filePath + ":" + lineNumber );
+				}
+			}
+		}
+	}
+
+	/**
+	 * Track a source breakpoint by creating a Breakpoint object and storing it as pending.
+	 * This encapsulates the breakpoint creation logic and provides better separation of concerns.
+	 * 
+	 * @param source           The source file information
+	 * @param sourceBreakpoint The source breakpoint from the client
+	 * 
+	 * @return The generated Breakpoint object
+	 */
+	public Breakpoint trackSourceBreakpoint( Source source, SourceBreakpoint sourceBreakpoint ) {
+		// Create the breakpoint with generated ID and initial state
+		Breakpoint breakpoint = new Breakpoint();
+		breakpoint.setId( generateBreakpointId() );
+		breakpoint.setLine( sourceBreakpoint.getLine() );
+		breakpoint.setVerified( false ); // Mark as unverified until program starts
+		breakpoint.setMessage( "Breakpoint will be verified when program starts" );
+
+		// Store the pending breakpoint for later verification
+		storePendingBreakpoint( source, sourceBreakpoint, breakpoint );
+
+		LOGGER.info( "Tracked breakpoint at line " + sourceBreakpoint.getLine() +
+		    " in " + ( source != null ? source.getPath() : "unknown" ) );
+
+		return breakpoint;
+	}
+
+	/**
+	 * Normalize file path for consistent storage keys
+	 */
+	private String normalizeFilePath( String filePath ) {
+		if ( filePath == null ) {
+			return "";
+		}
+
+		// Convert to absolute path and normalize separators
+		Path path = Paths.get( filePath ).toAbsolutePath().normalize();
+		return path.toString().replace( '\\', '/' );
 	}
 }

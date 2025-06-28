@@ -1,14 +1,19 @@
-Implement a new feature. Follow the steps below:
+Implement a new feature.
+
+Follow the steps below:
 
 1. Request the user to describe the feature they want to implement.
-2. Gather any specific requirements or constraints for the feature.
+2. Consider the user's input and clarify any ambiguities.
+   - Ask for specific details about the feature, such as its purpose, expected behavior, and any relevant context.
+   - If the user provides a name for the feature, use it; otherwise, suggest a descriptive name based on their input.
+   - Example: "You want to implement a feature that allows pausing on breakpoints. Let's call it `pause-on-breakpoint`."
 3. Create a plan for implementing the feature, output a simple outline for the user to see.
    - Define the feature's purpose and functionality.
    - Identify any new commands or configuration options needed.
    - Determine how the feature will interact with existing components.
-   - Create a new branch to work on: `feature/${input:name:feature-name-goes-here}`
 4. Implement the feature:
-   - Implement a tests to cover the new functionality.
+   - Create and checkout a new branch to work on: `feature/${input:name:feature-name-goes-here}`
+   - Implement tests to cover the new functionality.
    - Use existing test frameworks and patterns in the codebase.
    - Commit changes incrementally with clear messages.
    - Ensure the feature adheres to the project's coding standards and style.
