@@ -13,12 +13,15 @@ import java.util.logging.Logger;
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StoppedEventArguments;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 
 import com.sun.jdi.AbsentInformationException;
+import com.sun.jdi.IncompatibleThreadStateException;
 import com.sun.jdi.Location;
 import com.sun.jdi.ReferenceType;
+import com.sun.jdi.ThreadReference;
 import com.sun.jdi.VirtualMachine;
 import com.sun.jdi.event.BreakpointEvent;
 import com.sun.jdi.event.ClassPrepareEvent;
@@ -557,5 +560,101 @@ public class BreakpointManager {
 		// Convert to absolute path and normalize separators
 		Path path = Paths.get( filePath ).toAbsolutePath().normalize();
 		return path.toString().replace( '\\', '/' );
+	}
+
+	/**
+	 * Get stack frames for the specified thread
+	 */
+	public List<StackFrame> getStackFrames( int threadId ) {
+		List<StackFrame> stackFrames = new ArrayList<>();
+		
+		if ( vm == null ) {
+			LOGGER.warning( "Virtual machine not available for stack trace" );
+			return stackFrames;
+		}
+
+		try {
+			// Find the thread by ID
+			ThreadReference targetThread = null;
+			for ( ThreadReference thread : vm.allThreads() ) {
+				if ( thread.uniqueID() == threadId ) {
+					targetThread = thread;
+					break;
+				}
+			}
+
+			if ( targetThread == null ) {
+				LOGGER.warning( "Thread not found with ID: " + threadId );
+				return stackFrames;
+			}
+
+			// Check if thread is suspended
+			if ( !targetThread.isSuspended() ) {
+				LOGGER.warning( "Thread " + threadId + " is not suspended, cannot get stack frames" );
+				return stackFrames;
+			}
+
+			// Get stack frames from the suspended thread
+			List<com.sun.jdi.StackFrame> jdiFrames = targetThread.frames();
+			
+			for ( int i = 0; i < jdiFrames.size(); i++ ) {
+				com.sun.jdi.StackFrame jdiFrame = jdiFrames.get( i );
+				StackFrame dapFrame = new StackFrame();
+				
+				// Set frame ID (using index)
+				dapFrame.setId( i );
+				
+				// Set frame name (method name)
+				String frameName = jdiFrame.location().method().name();
+				if ( frameName != null ) {
+					dapFrame.setName( frameName );
+				} else {
+					dapFrame.setName( "<unknown>" );
+				}
+				
+				// Set line number
+				try {
+					int lineNumber = jdiFrame.location().lineNumber();
+					dapFrame.setLine( lineNumber );
+				} catch ( Exception e ) {
+					dapFrame.setLine( 0 );
+				}
+				
+				// Set column (default to 0)
+				dapFrame.setColumn( 0 );
+				
+				// Set source information
+				try {
+					Location location = jdiFrame.location();
+					String sourceName = location.sourceName();
+					String sourcePath = location.sourcePath();
+					
+					Source source = new Source();
+					source.setName( sourceName );
+					
+					// Try to construct full path
+					if ( sourcePath != null ) {
+						source.setPath( sourcePath );
+					}
+					
+					dapFrame.setSource( source );
+				} catch ( AbsentInformationException e ) {
+					// Source information not available
+					LOGGER.fine( "Source information not available for frame: " + frameName );
+				}
+				
+				stackFrames.add( dapFrame );
+			}
+			
+			LOGGER.info( "Retrieved " + stackFrames.size() + " stack frames for thread " + threadId );
+			
+		} catch ( IncompatibleThreadStateException e ) {
+			LOGGER.severe( "Thread state incompatible for stack trace: " + e.getMessage() );
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error retrieving stack frames: " + e.getMessage() );
+			e.printStackTrace();
+		}
+		
+		return stackFrames;
 	}
 }

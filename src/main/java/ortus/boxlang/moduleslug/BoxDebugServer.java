@@ -18,7 +18,11 @@ import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
+import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.StackFrame;
+import org.eclipse.lsp4j.debug.StackTraceArguments;
+import org.eclipse.lsp4j.debug.StackTraceResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
@@ -295,10 +299,38 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		LOGGER.info( "Debug session cleanup completed" );
 	}
 
-	public CompletableFuture<Void> disconnect( Map<String, Object> args ) {
-		return CompletableFuture.runAsync( () -> {
-			LOGGER.info( "Disconnect request received" );
-			cleanup();
+	@Override
+	public CompletableFuture<StackTraceResponse> stackTrace( StackTraceArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			try {
+				LOGGER.info( "Stack trace request received for thread: " + args.getThreadId() );
+
+				StackTraceResponse response = new StackTraceResponse();
+				
+				if ( vm != null && breakpointManager != null ) {
+					// Get stack frames from the breakpoint manager
+					List<StackFrame> stackFrames = breakpointManager.getStackFrames( args.getThreadId() );
+					response.setStackFrames( stackFrames.toArray( new StackFrame[ 0 ] ) );
+					response.setTotalFrames( stackFrames.size() );
+					
+					LOGGER.info( "Returning " + stackFrames.size() + " stack frames" );
+				} else {
+					LOGGER.warning( "VM or breakpoint manager not available for stack trace" );
+					response.setStackFrames( new StackFrame[ 0 ] );
+					response.setTotalFrames( 0 );
+				}
+				
+				return response;
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error processing stack trace request: " + e.getMessage() );
+				e.printStackTrace();
+				
+				// Return empty response on error
+				StackTraceResponse response = new StackTraceResponse();
+				response.setStackFrames( new StackFrame[ 0 ] );
+				response.setTotalFrames( 0 );
+				return response;
+			}
 		} );
 	}
 }
