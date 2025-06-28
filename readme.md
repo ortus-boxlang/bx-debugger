@@ -16,6 +16,46 @@
 
 <p>&nbsp;</p>
 
+This module provides a Debug Adapter Protocol (DAP) compliant debugger for BoxLang applications. It enables debugging capabilities in IDEs and editors that support the DAP standard.
+
+## Features
+
+- **Breakpoint Management**: Set and manage breakpoints in BoxLang source code
+- **Stack Information**: Retrieve detailed stack traces when execution is paused
+- **Output Monitoring**: Capture and relay program output to the debug client
+- **Thread Management**: Support for multi-threaded debugging scenarios
+- **DAP Compliance**: Full compatibility with Debug Adapter Protocol specifications
+
+### Stack Information Feature
+
+The debugger provides comprehensive stack trace information when execution is paused at breakpoints:
+
+- **Method Names**: Display the current method or function being executed
+- **Line Numbers**: Show exact line numbers where execution is paused
+- **Source Information**: Provide source file paths and names
+- **Thread Context**: Stack frames are retrieved per thread for multi-threaded applications
+
+**Usage Example:**
+When a breakpoint is hit, debug clients can request stack information using the `stackTrace` DAP request. The debugger returns an array of stack frames with details about each level of the call stack.
+
+```json
+{
+  "stackFrames": [
+    {
+      "id": 0,
+      "name": "add",
+      "line": 41,
+      "column": 0,
+      "source": {
+        "name": "TestOutputProducer.java",
+        "path": "/path/to/TestOutputProducer.java"
+      }
+    }
+  ],
+  "totalFrames": 1
+}
+```
+
 This template can be used to create Ortus based BoxLang Modules. To use, just click the `Use this Template` button in the github repository: https://github.com/ortus-boxlang/boxlang-module-template and run the setup task from where you cloned it.
 
 ```bash
