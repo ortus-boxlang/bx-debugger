@@ -1,5 +1,9 @@
 package ortus.boxlang.moduleslug;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -8,22 +12,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
+import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
-import org.eclipse.lsp4j.services.LanguageClient;
 
-import com.sun.jdi.Bootstrap;
 import com.sun.jdi.VirtualMachine;
-import com.sun.jdi.connect.Connector;
-import com.sun.jdi.connect.LaunchingConnector;
 
 /**
  * BoxLang Debug Server implementation of the Debug Adapter Protocol
@@ -34,7 +38,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	// Debug session state
 	private VirtualMachine								vm;
-	private LanguageClient								client;
+	private IDebugProtocolClient						client;
+	private Process										debuggedProcess;
+	private ExecutorService								outputMonitorExecutor;
 	private int											breakpointIdCounter			= 1;
 
 	// Breakpoint storage - organized by file path
@@ -88,7 +94,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	/**
 	 * Connect to the language client
 	 */
-	public void connect( LanguageClient client ) {
+	public void connect( IDebugProtocolClient client ) {
 		this.client = client;
 		LOGGER.info( "Connected to debug client" );
 	}
@@ -134,25 +140,109 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<Void> launch( Map<String, Object> args ) {
-		LaunchingConnector				launchingConnector	= Bootstrap.virtualMachineManager().defaultConnector();
-		Map<String, Connector.Argument>	arguments			= launchingConnector.defaultArguments();
-		String							cp					= System.getProperty( "java.class.path" );
+		return CompletableFuture.supplyAsync( () -> {
+			try {
+				String program = ( String ) args.get( "program" );
+				LOGGER.info( "Launching BoxLang program: " + program );
 
-		String							program				= ( String ) args.get( "program" );
+				// Build the command to run BoxLang
+				ProcessBuilder	processBuilder	= new ProcessBuilder();
 
-		arguments.get( "options" ).setValue( "-cp \"" + cp + "\"" );
-		arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner" + " " + program );
+				List<String>	command			= new ArrayList<>();
+				command.add( "java" );
+				command.add( "-cp" );
+				command.add( System.getProperty( "java.class.path" ) );
+				command.add( "ortus.boxlang.runtime.BoxRunner" );
+				command.add( program );
 
+				String bxHome = ( String ) args.get( "bx-home" );
+				if ( bxHome != null ) {
+					command.add( "--bx-home" );
+					command.add( bxHome );
+				}
+
+				processBuilder.command( command );
+
+				// Start the process
+				debuggedProcess = processBuilder.start();
+				LOGGER.info( "Process started with PID: " + debuggedProcess.pid() );
+
+				// Initialize output monitoring
+				startOutputMonitoring();
+
+				// TODO: Verify pending breakpoints against the actual source file
+				verifyPendingBreakpoints();
+
+				return null;
+			} catch ( Exception e ) {
+				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
+				e.printStackTrace();
+				throw new RuntimeException( "Launch failed", e );
+			}
+		} );
+	}
+
+	/**
+	 * Check if we're running in a test environment
+	 */
+	private boolean isTestEnvironment() {
+		// Simple heuristic: check if junit is on the classpath
 		try {
-			this.vm = launchingConnector.launch( arguments );
-		} catch ( Exception e ) {
-			LOGGER.severe( "Failed to launch VM: " + e.getMessage() );
-			CompletableFuture.failedFuture( e );
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+			Class.forName( "org.junit.jupiter.api.Test" );
+			return true;
+		} catch ( ClassNotFoundException e ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Start monitoring output from the debugged process
+	 */
+	private void startOutputMonitoring() {
+		if ( outputMonitorExecutor == null ) {
+			outputMonitorExecutor = Executors.newFixedThreadPool( 2 );
 		}
 
-		return CompletableFuture.completedFuture( null );
+		// Monitor stdout
+		outputMonitorExecutor.submit( () -> monitorOutputStream( debuggedProcess.getInputStream(), "stdout" ) );
+
+		// Monitor stderr
+		outputMonitorExecutor.submit( () -> monitorOutputStream( debuggedProcess.getErrorStream(), "stderr" ) );
+
+		LOGGER.info( "Started output monitoring for debugged process" );
+	}
+
+	/**
+	 * Monitor an output stream and send events to the client
+	 */
+	private void monitorOutputStream( InputStream inputStream, String category ) {
+		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
+			String line;
+			while ( ( line = reader.readLine() ) != null ) {
+				if ( client != null ) {
+					OutputEventArguments outputEvent = new OutputEventArguments();
+					outputEvent.setOutput( line + System.lineSeparator() );
+					outputEvent.setCategory( category );
+
+					LOGGER.info( "Sending output event: " + line );
+					client.output( outputEvent );
+				}
+			}
+		} catch ( IOException e ) {
+			LOGGER.warning( "Error reading from " + category + " stream: " + e.getMessage() );
+		}
+	}
+
+	/**
+	 * Verify pending breakpoints against the actual source (placeholder implementation)
+	 */
+	private void verifyPendingBreakpoints() {
+		// TODO: Implement actual breakpoint verification logic
+		// For now, just log that verification would happen here
+		int totalPending = pendingBreakpointsById.size();
+		if ( totalPending > 0 ) {
+			LOGGER.info( "Would verify " + totalPending + " pending breakpoints against loaded sources" );
+		}
 	}
 
 	@Override
@@ -281,5 +371,43 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		// Convert to absolute path and normalize separators
 		Path path = Paths.get( filePath ).toAbsolutePath().normalize();
 		return path.toString().replace( '\\', '/' );
+	}
+
+	/**
+	 * Clean up resources when debugging session ends
+	 */
+	public void cleanup() {
+		LOGGER.info( "Cleaning up debug session resources" );
+
+		// Shutdown output monitoring
+		if ( outputMonitorExecutor != null ) {
+			outputMonitorExecutor.shutdownNow();
+			outputMonitorExecutor = null;
+		}
+
+		// Terminate debugged process if still running
+		if ( debuggedProcess != null && debuggedProcess.isAlive() ) {
+			debuggedProcess.destroyForcibly();
+			debuggedProcess = null;
+		}
+
+		// Clean up VM if present
+		if ( vm != null ) {
+			try {
+				vm.exit( 0 );
+			} catch ( Exception e ) {
+				LOGGER.warning( "Error closing VM: " + e.getMessage() );
+			}
+			vm = null;
+		}
+
+		LOGGER.info( "Debug session cleanup completed" );
+	}
+
+	public CompletableFuture<Void> disconnect( Map<String, Object> args ) {
+		return CompletableFuture.runAsync( () -> {
+			LOGGER.info( "Disconnect request received" );
+			cleanup();
+		} );
 	}
 }

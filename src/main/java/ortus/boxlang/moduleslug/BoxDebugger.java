@@ -10,8 +10,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
+import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
-import org.eclipse.lsp4j.services.LanguageClient;
 
 public class BoxDebugger {
 
@@ -135,12 +135,12 @@ public class BoxDebugger {
 	private static void handleClient( SocketChannel clientSocket ) {
 		try {
 			// Create the debug server instance
-			BoxDebugServer				debugServer	= new BoxDebugServer();
+			BoxDebugServer					debugServer	= new BoxDebugServer();
 
 			// Create the LSP4J launcher for the debug adapter protocol
-			Launcher<LanguageClient>	launcher	= Launcher.createLauncher(
+			Launcher<IDebugProtocolClient>	launcher	= Launcher.createLauncher(
 			    debugServer,
-			    LanguageClient.class,
+			    IDebugProtocolClient.class,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);

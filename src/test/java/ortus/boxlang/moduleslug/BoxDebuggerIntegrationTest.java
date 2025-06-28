@@ -26,6 +26,7 @@ import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 import org.junit.jupiter.api.AfterEach;
@@ -207,29 +208,103 @@ public class BoxDebuggerIntegrationTest {
 			assertTrue( true, "Integration test completed successfully" );
 
 		} catch ( Exception e ) {
-			e.printStackTrace();
-			fail( "Debug session failed: " + e.getMessage() );
+			fail( e );
 		}
 	}
 
 	/**
 	 * Simple debug client implementation for testing
 	 */
-	private static class DebugClient {
+	private static class DebugClient implements IDebugProtocolClient {
 
 		private static final Logger CLIENT_LOGGER = Logger.getLogger( DebugClient.class.getName() );
 
-		// This would implement IDebugProtocolClient in a real scenario
-		// For now, it's just a placeholder that can receive events from the server
+		// Implement required methods from IDebugProtocolClient
+		// Most are no-ops for this test, but they need to be present
 
-		@SuppressWarnings( "unused" )
-		public void onStopped( /* StoppedEventArguments args */ ) {
+		@Override
+		public void initialized() {
+			CLIENT_LOGGER.info( "Debug client initialized" );
+		}
+
+		@Override
+		public void stopped( org.eclipse.lsp4j.debug.StoppedEventArguments args ) {
 			CLIENT_LOGGER.info( "Received stopped event from debug server" );
 		}
 
-		@SuppressWarnings( "unused" )
-		public void onTerminated( /* TerminatedEventArguments args */ ) {
+		@Override
+		public void continued( org.eclipse.lsp4j.debug.ContinuedEventArguments args ) {
+			CLIENT_LOGGER.info( "Received continued event from debug server" );
+		}
+
+		@Override
+		public void exited( org.eclipse.lsp4j.debug.ExitedEventArguments args ) {
+			CLIENT_LOGGER.info( "Received exited event from debug server" );
+		}
+
+		@Override
+		public void terminated( org.eclipse.lsp4j.debug.TerminatedEventArguments args ) {
 			CLIENT_LOGGER.info( "Received terminated event from debug server" );
+		}
+
+		@Override
+		public void thread( org.eclipse.lsp4j.debug.ThreadEventArguments args ) {
+			CLIENT_LOGGER.info( "Received thread event from debug server" );
+		}
+
+		@Override
+		public void output( org.eclipse.lsp4j.debug.OutputEventArguments args ) {
+			CLIENT_LOGGER.info( "Received output event: " + args.getOutput() );
+		}
+
+		@Override
+		public void breakpoint( org.eclipse.lsp4j.debug.BreakpointEventArguments args ) {
+			CLIENT_LOGGER.info( "Received breakpoint event from debug server" );
+		}
+
+		@Override
+		public void module( org.eclipse.lsp4j.debug.ModuleEventArguments args ) {
+			CLIENT_LOGGER.info( "Received module event from debug server" );
+		}
+
+		@Override
+		public void loadedSource( org.eclipse.lsp4j.debug.LoadedSourceEventArguments args ) {
+			CLIENT_LOGGER.info( "Received loaded source event from debug server" );
+		}
+
+		@Override
+		public void process( org.eclipse.lsp4j.debug.ProcessEventArguments args ) {
+			CLIENT_LOGGER.info( "Received process event from debug server" );
+		}
+
+		@Override
+		public void capabilities( org.eclipse.lsp4j.debug.CapabilitiesEventArguments args ) {
+			CLIENT_LOGGER.info( "Received capabilities event from debug server" );
+		}
+
+		@Override
+		public void progressStart( org.eclipse.lsp4j.debug.ProgressStartEventArguments args ) {
+			CLIENT_LOGGER.info( "Received progress start event from debug server" );
+		}
+
+		@Override
+		public void progressUpdate( org.eclipse.lsp4j.debug.ProgressUpdateEventArguments args ) {
+			CLIENT_LOGGER.info( "Received progress update event from debug server" );
+		}
+
+		@Override
+		public void progressEnd( org.eclipse.lsp4j.debug.ProgressEndEventArguments args ) {
+			CLIENT_LOGGER.info( "Received progress end event from debug server" );
+		}
+
+		@Override
+		public void invalidated( org.eclipse.lsp4j.debug.InvalidatedEventArguments args ) {
+			CLIENT_LOGGER.info( "Received invalidated event from debug server" );
+		}
+
+		@Override
+		public void memory( org.eclipse.lsp4j.debug.MemoryEventArguments args ) {
+			CLIENT_LOGGER.info( "Received memory event from debug server" );
 		}
 	}
 

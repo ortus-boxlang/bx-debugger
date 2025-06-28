@@ -37,16 +37,27 @@ dependencies {
 	// Until BoxLang is published to Maven Central
 	// Look for it in the local build directory
 	// You must run `./gradle build -x test` in the BoxLang project
-	if ( file( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
-		compileOnly files( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
-		testImplementation files( '../../boxlang/build/distributions/boxlang-' + boxlangVersion + '.jar' )
-	} else {
-    	compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
-		testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
-	}
+	// if ( file( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
+	// 	compileOnly files( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
+	// 	testImplementation files( '../../boxlang/build/distributions/boxlang-' + boxlangVersion + '.jar' )
+	// } else {
+    // 	compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+	// 	testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+	// }
+	compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+	testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+
+
+	// LSP4J - Language Server Protocol for Java
+	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j:0.23.1"
+	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j.debug:0.23.1"
+	
+	// SLF4J for logging
+	// implementation "org.slf4j:slf4j-api:2.0.9"
+	// implementation "ch.qos.logback:logback-classic:1.4.14"
 
 	// Test Frameworks
-	testImplementation "org.junit.jupiter:junit-jupiter:5.+"
+	testImplementation "org.junit.jupiter:junit-jupiter:5.13.1"
 	testImplementation "org.mockito:mockito-core:5.+"
 	testImplementation "com.google.truth:truth:1.+"
 	// Explicitly declare the JUnit platform launcher (to avoid deprecation)
