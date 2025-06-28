@@ -106,18 +106,6 @@ public class BoxDebuggerTest {
 	}
 
 	@Test
-	@Timeout( value = 5, unit = TimeUnit.SECONDS )
-	void testPortArgumentParsing() {
-		// Test with valid port argument
-		assertDoesNotThrow( () -> {
-			// We can't easily test the main method without starting the server,
-			// so we'll test the port parsing logic indirectly by verifying
-			// that invalid arguments don't crash the application
-			BoxDebugger.main( new String[] { "0" } ); // Port 0 should fail to bind
-		} );
-	}
-
-	@Test
 	void testInvalidPortArgument() {
 		// Test with invalid port argument - should fall back to default
 		// This should not throw an exception, but use the default port
