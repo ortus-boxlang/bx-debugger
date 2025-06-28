@@ -1,5 +1,6 @@
 package ortus.boxlang.moduleslug;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -177,6 +178,9 @@ public class BoxDebuggerIntegrationTest {
 
 			assertNotNull( breakpointResult, "Should receive breakpoint response" );
 			assertNotNull( breakpointResult.getBreakpoints(), "Should have breakpoints in response" );
+			assertThat( breakpointResult.getBreakpoints().length ).isGreaterThan( 0 );
+			assertThat( breakpointResult.getBreakpoints()[ 0 ].getLine() ).isEqualTo( 5 );
+			assertThat( breakpointResult.getBreakpoints()[ 0 ].isVerified() ).isFalse();
 
 			// Verify breakpoint was set (for now, we'll just check that we got a response)
 			// In a full implementation, we'd verify the breakpoint was actually set at line 5

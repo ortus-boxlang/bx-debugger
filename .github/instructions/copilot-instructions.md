@@ -1,3 +1,6 @@
+---
+applyTo: "**"
+---
 # bx-debugger Project Instructions
 
 This project is a DAP compliant debugger for BoxLang, a dynamic JVM language.
