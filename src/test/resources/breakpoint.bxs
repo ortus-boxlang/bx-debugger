@@ -1,0 +1,10 @@
+// this is a script file for testing breakpoints
+// it contains a simple function that returns the sum of two numbers
+function add(a, b) {
+    // this is a comment
+    return a + b; // return the sum of a and b
+}
+
+res = add( 3, 5 );
+
+println( res )
