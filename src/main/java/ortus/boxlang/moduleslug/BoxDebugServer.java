@@ -27,7 +27,10 @@ import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
+import com.sun.jdi.Bootstrap;
 import com.sun.jdi.VirtualMachine;
+import com.sun.jdi.connect.Connector;
+import com.sun.jdi.connect.LaunchingConnector;
 
 /**
  * BoxLang Debug Server implementation of the Debug Adapter Protocol
@@ -41,6 +44,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IDebugProtocolClient						client;
 	private Process										debuggedProcess;
 	private ExecutorService								outputMonitorExecutor;
+	private BreakpointManager							breakpointManager;
 	private int											breakpointIdCounter			= 1;
 
 	// Breakpoint storage - organized by file path
@@ -143,35 +147,38 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		return CompletableFuture.supplyAsync( () -> {
 			try {
 				String program = ( String ) args.get( "program" );
-				LOGGER.info( "Launching BoxLang program: " + program );
+				LOGGER.info( "Launching BoxLang program with JDI: " + program );
 
-				// Build the command to run BoxLang
-				ProcessBuilder	processBuilder	= new ProcessBuilder();
+				// Use JDI to launch the program with debugging enabled
+				LaunchingConnector				launchingConnector	= Bootstrap.virtualMachineManager().defaultConnector();
+				Map<String, Connector.Argument>	arguments			= launchingConnector.defaultArguments();
 
-				List<String>	command			= new ArrayList<>();
-				command.add( "java" );
-				command.add( "-cp" );
-				command.add( System.getProperty( "java.class.path" ) );
-				command.add( "ortus.boxlang.runtime.BoxRunner" );
-				command.add( program );
+				// Set up the command line arguments
+				String							classpath			= System.getProperty( "java.class.path" );
+				arguments.get( "options" ).setValue( "-cp \"" + classpath + "\"" );
 
-				String bxHome = ( String ) args.get( "bx-home" );
-				if ( bxHome != null ) {
-					command.add( "--bx-home" );
-					command.add( bxHome );
+				// For testing, use our test class, otherwise use BoxRunner
+				if ( isTestEnvironment() ) {
+					arguments.get( "main" ).setValue( "ortus.boxlang.moduleslug.TestOutputProducer " + program );
+				} else {
+					arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner " + program );
 				}
 
-				processBuilder.command( command );
+				// Launch the VM
+				vm = launchingConnector.launch( arguments );
+				LOGGER.info( "JDI VM launched successfully" );
 
-				// Start the process
-				debuggedProcess = processBuilder.start();
-				LOGGER.info( "Process started with PID: " + debuggedProcess.pid() );
+				// Initialize breakpoint manager
+				breakpointManager = new BreakpointManager( vm, client );
 
-				// Initialize output monitoring
+				// Set actual breakpoints for all pending breakpoints
+				verifyAndSetPendingBreakpoints();
+
+				// Start breakpoint event processing
+				breakpointManager.startEventProcessing();
+
+				// Start output monitoring using the VM's process
 				startOutputMonitoring();
-
-				// TODO: Verify pending breakpoints against the actual source file
-				verifyPendingBreakpoints();
 
 				return null;
 			} catch ( Exception e ) {
@@ -196,20 +203,27 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	/**
-	 * Start monitoring output from the debugged process
+	 * Start monitoring output from the debugged VM process
 	 */
 	private void startOutputMonitoring() {
 		if ( outputMonitorExecutor == null ) {
 			outputMonitorExecutor = Executors.newFixedThreadPool( 2 );
 		}
 
-		// Monitor stdout
-		outputMonitorExecutor.submit( () -> monitorOutputStream( debuggedProcess.getInputStream(), "stdout" ) );
+		// Get the process from the VM
+		if ( vm != null && vm.process() != null ) {
+			Process process = vm.process();
 
-		// Monitor stderr
-		outputMonitorExecutor.submit( () -> monitorOutputStream( debuggedProcess.getErrorStream(), "stderr" ) );
+			// Monitor stdout
+			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getInputStream(), "stdout" ) );
 
-		LOGGER.info( "Started output monitoring for debugged process" );
+			// Monitor stderr
+			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
+
+			LOGGER.info( "Started output monitoring for debugged VM process" );
+		} else {
+			LOGGER.warning( "Could not start output monitoring - VM or process is null" );
+		}
 	}
 
 	/**
@@ -234,14 +248,33 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	/**
-	 * Verify pending breakpoints against the actual source (placeholder implementation)
+	 * Verify and set pending breakpoints using the BreakpointManager
 	 */
-	private void verifyPendingBreakpoints() {
-		// TODO: Implement actual breakpoint verification logic
-		// For now, just log that verification would happen here
+	private void verifyAndSetPendingBreakpoints() {
+		if ( breakpointManager == null ) {
+			LOGGER.warning( "BreakpointManager not available, cannot set breakpoints" );
+			return;
+		}
+
 		int totalPending = pendingBreakpointsById.size();
 		if ( totalPending > 0 ) {
-			LOGGER.info( "Would verify " + totalPending + " pending breakpoints against loaded sources" );
+			LOGGER.info( "Setting " + totalPending + " pending breakpoints" );
+
+			for ( PendingBreakpoint pending : pendingBreakpointsById.values() ) {
+				String	filePath	= pending.getFilePath();
+				int		lineNumber	= pending.getSourceBreakpoint().getLine();
+
+				boolean	success		= breakpointManager.setBreakpoint( filePath, lineNumber );
+				if ( success ) {
+					// Mark breakpoint as verified
+					pending.getBreakpoint().setVerified( true );
+					pending.getBreakpoint().setMessage( "Breakpoint verified and set" );
+					LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
+				} else {
+					pending.getBreakpoint().setMessage( "Could not verify breakpoint location" );
+					LOGGER.warning( "Failed to set breakpoint at " + filePath + ":" + lineNumber );
+				}
+			}
 		}
 	}
 
@@ -378,6 +411,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 */
 	public void cleanup() {
 		LOGGER.info( "Cleaning up debug session resources" );
+
+		// Stop breakpoint manager
+		if ( breakpointManager != null ) {
+			breakpointManager.stopEventProcessing();
+			breakpointManager.clearAllBreakpoints();
+			breakpointManager = null;
+		}
 
 		// Shutdown output monitoring
 		if ( outputMonitorExecutor != null ) {
