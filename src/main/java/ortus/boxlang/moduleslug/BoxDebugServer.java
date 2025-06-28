@@ -306,25 +306,25 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				LOGGER.info( "Stack trace request received for thread: " + args.getThreadId() );
 
 				StackTraceResponse response = new StackTraceResponse();
-				
+
 				if ( vm != null && breakpointManager != null ) {
 					// Get stack frames from the breakpoint manager
 					List<StackFrame> stackFrames = breakpointManager.getStackFrames( args.getThreadId() );
 					response.setStackFrames( stackFrames.toArray( new StackFrame[ 0 ] ) );
 					response.setTotalFrames( stackFrames.size() );
-					
+
 					LOGGER.info( "Returning " + stackFrames.size() + " stack frames" );
 				} else {
 					LOGGER.warning( "VM or breakpoint manager not available for stack trace" );
 					response.setStackFrames( new StackFrame[ 0 ] );
 					response.setTotalFrames( 0 );
 				}
-				
+
 				return response;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Error processing stack trace request: " + e.getMessage() );
 				e.printStackTrace();
-				
+
 				// Return empty response on error
 				StackTraceResponse response = new StackTraceResponse();
 				response.setStackFrames( new StackFrame[ 0 ] );

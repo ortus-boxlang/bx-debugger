@@ -567,7 +567,7 @@ public class BreakpointManager {
 	 */
 	public List<StackFrame> getStackFrames( int threadId ) {
 		List<StackFrame> stackFrames = new ArrayList<>();
-		
+
 		if ( vm == null ) {
 			LOGGER.warning( "Virtual machine not available for stack trace" );
 			return stackFrames;
@@ -596,14 +596,14 @@ public class BreakpointManager {
 
 			// Get stack frames from the suspended thread
 			List<com.sun.jdi.StackFrame> jdiFrames = targetThread.frames();
-			
+
 			for ( int i = 0; i < jdiFrames.size(); i++ ) {
-				com.sun.jdi.StackFrame jdiFrame = jdiFrames.get( i );
-				StackFrame dapFrame = new StackFrame();
-				
+				com.sun.jdi.StackFrame	jdiFrame	= jdiFrames.get( i );
+				StackFrame				dapFrame	= new StackFrame();
+
 				// Set frame ID (using index)
 				dapFrame.setId( i );
-				
+
 				// Set frame name (method name)
 				String frameName = jdiFrame.location().method().name();
 				if ( frameName != null ) {
@@ -611,7 +611,7 @@ public class BreakpointManager {
 				} else {
 					dapFrame.setName( "<unknown>" );
 				}
-				
+
 				// Set line number
 				try {
 					int lineNumber = jdiFrame.location().lineNumber();
@@ -619,42 +619,42 @@ public class BreakpointManager {
 				} catch ( Exception e ) {
 					dapFrame.setLine( 0 );
 				}
-				
+
 				// Set column (default to 0)
 				dapFrame.setColumn( 0 );
-				
+
 				// Set source information
 				try {
-					Location location = jdiFrame.location();
-					String sourceName = location.sourceName();
-					String sourcePath = location.sourcePath();
-					
-					Source source = new Source();
+					Location	location	= jdiFrame.location();
+					String		sourceName	= location.sourceName();
+					String		sourcePath	= location.sourcePath();
+
+					Source		source		= new Source();
 					source.setName( sourceName );
-					
+
 					// Try to construct full path
 					if ( sourcePath != null ) {
 						source.setPath( sourcePath );
 					}
-					
+
 					dapFrame.setSource( source );
 				} catch ( AbsentInformationException e ) {
 					// Source information not available
 					LOGGER.fine( "Source information not available for frame: " + frameName );
 				}
-				
+
 				stackFrames.add( dapFrame );
 			}
-			
+
 			LOGGER.info( "Retrieved " + stackFrames.size() + " stack frames for thread " + threadId );
-			
+
 		} catch ( IncompatibleThreadStateException e ) {
 			LOGGER.severe( "Thread state incompatible for stack trace: " + e.getMessage() );
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error retrieving stack frames: " + e.getMessage() );
 			e.printStackTrace();
 		}
-		
+
 		return stackFrames;
 	}
 }

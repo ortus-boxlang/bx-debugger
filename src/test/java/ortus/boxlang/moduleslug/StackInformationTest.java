@@ -181,7 +181,7 @@ public class StackInformationTest {
 			// Now test the stackTrace request
 			StackTraceArguments stackArgs = new StackTraceArguments();
 			stackArgs.setThreadId( stoppedEvent.getThreadId() );
-			
+
 			CompletableFuture<StackTraceResponse>	stackResponse	= debugServer.stackTrace( stackArgs );
 			StackTraceResponse						stackResult		= stackResponse.get( 10, TimeUnit.SECONDS );
 
@@ -195,7 +195,7 @@ public class StackInformationTest {
 			assertNotNull( topFrame, "Top stack frame should not be null" );
 			assertNotNull( topFrame.getName(), "Stack frame should have a name" );
 			assertTrue( topFrame.getLine() > 0, "Stack frame should have a valid line number" );
-			
+
 			if ( topFrame.getSource() != null ) {
 				assertNotNull( topFrame.getSource().getPath(), "Stack frame source should have a path" );
 			}
