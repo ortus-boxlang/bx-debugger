@@ -124,7 +124,7 @@ gradle downloadBoxLang
 This will store the binary under `/src/test/resources/libs` for you to use in your tests and compiler. Here are some basic tasks
 
 | Task                | Description                                                                                                       |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+|---------------------|-------------------------------------------------------------------------------------------------------------------|
 | `build`             | The default lifecycle task that triggers the build process, including tasks like `clean`, `assemble`, and others. |
 | `clean`             | Deletes the `build` folders. It helps ensure a clean build by removing any previously generated artifacts.        |
 | `compileJava`       | Compiles Java source code files located in the `src/main/java` directory                                          |
