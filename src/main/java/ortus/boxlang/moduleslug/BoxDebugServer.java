@@ -45,6 +45,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private Process					debuggedProcess;
 	private ExecutorService			outputMonitorExecutor;
 	private BreakpointManager		breakpointManager;
+	
+	// BoxLang debugging configuration
+	private String					debugMode			= "BoxLang"; // Default to BoxLang mode
 
 	// Exit handling state
 	private volatile boolean		sessionActive		= false;
@@ -105,6 +108,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
+
+				// Configure debug mode
+				String requestedMode = ( String ) args.get( "debugMode" );
+				if ( requestedMode != null ) {
+					debugMode = requestedMode;
+				}
+				LOGGER.info( "Debug mode set to: " + debugMode );
 
 				// Use JDI to launch the program with debugging enabled
 				LaunchingConnector				launchingConnector	= Bootstrap.virtualMachineManager().defaultConnector();
@@ -320,24 +330,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	public CompletableFuture<StackTraceResponse> stackTrace( StackTraceArguments args ) {
 		return CompletableFuture.supplyAsync( () -> {
 			try {
-				LOGGER.info( "Stack trace request received for thread: " + args.getThreadId() );
+				LOGGER.info( "Stack trace request received for thread: " + args.getThreadId() + " in " + debugMode + " mode" );
 
-				StackTraceResponse response = new StackTraceResponse();
+				return handleStackTraceRequest( args.getThreadId(), debugMode );
 
-				if ( vm != null && breakpointManager != null ) {
-					// Get stack frames from the breakpoint manager
-					List<StackFrame> stackFrames = breakpointManager.getStackFrames( args.getThreadId() );
-					response.setStackFrames( stackFrames.toArray( new StackFrame[ 0 ] ) );
-					response.setTotalFrames( stackFrames.size() );
-
-					LOGGER.info( "Returning " + stackFrames.size() + " stack frames" );
-				} else {
-					LOGGER.warning( "VM or breakpoint manager not available for stack trace" );
-					response.setStackFrames( new StackFrame[ 0 ] );
-					response.setTotalFrames( 0 );
-				}
-
-				return response;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Error processing stack trace request: " + e.getMessage() );
 				e.printStackTrace();
@@ -349,6 +345,95 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return response;
 			}
 		} );
+	}
+
+	/**
+	 * Enhanced stack trace request handler that supports BoxLang and Java modes
+	 * 
+	 * @param threadId the thread ID to get stack frames for
+	 * @param mode the debug mode ("BoxLang" or "Java")
+	 * @return StackTraceResponse with filtered frames based on mode
+	 */
+	private StackTraceResponse handleStackTraceRequest( int threadId, String mode ) {
+		StackTraceResponse response = new StackTraceResponse();
+
+		if ( vm == null || breakpointManager == null ) {
+			LOGGER.warning( "VM or breakpoint manager not available for stack trace" );
+			response.setStackFrames( new StackFrame[ 0 ] );
+			response.setTotalFrames( 0 );
+			return response;
+		}
+
+		try {
+			// Get all stack frames from the breakpoint manager
+			List<StackFrame> allFrames = breakpointManager.getStackFrames( threadId );
+			
+			// Convert to BoxLang stack frames and apply filtering based on mode
+			List<BoxLangStackFrame> boxLangFrames = new ArrayList<>();
+			for ( StackFrame frame : allFrames ) {
+				BoxLangStackFrame boxFrame = BoxLangStackFrame.fromJavaFrame( frame );
+				boxLangFrames.add( boxFrame );
+			}
+
+			// Filter frames based on debug mode
+			List<StackFrame> filteredFrames = filterStackFramesByMode( boxLangFrames, mode );
+
+			response.setStackFrames( filteredFrames.toArray( new StackFrame[ 0 ] ) );
+			response.setTotalFrames( filteredFrames.size() );
+
+			LOGGER.info( "Returning " + filteredFrames.size() + " stack frames (filtered from " + allFrames.size() + " total frames)" );
+
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error in handleStackTraceRequest: " + e.getMessage() );
+			e.printStackTrace();
+			response.setStackFrames( new StackFrame[ 0 ] );
+			response.setTotalFrames( 0 );
+		}
+
+		return response;
+	}
+
+	/**
+	 * Filter stack frames based on the debug mode
+	 * 
+	 * @param frames the list of BoxLang stack frames
+	 * @param mode the debug mode ("BoxLang" or "Java")
+	 * @return filtered list of stack frames
+	 */
+	private List<StackFrame> filterStackFramesByMode( List<BoxLangStackFrame> frames, String mode ) {
+		List<StackFrame> filteredFrames = new ArrayList<>();
+
+		for ( BoxLangStackFrame frame : frames ) {
+			boolean includeFrame = false;
+
+			switch ( mode.toLowerCase() ) {
+				case "boxlang":
+					// In BoxLang mode, only include frames that are from BoxLang source
+					includeFrame = frame.isBoxLangFrame();
+					if ( includeFrame ) {
+						LOGGER.fine( "Including BoxLang frame: " + frame.getName() );
+					}
+					break;
+
+				case "java":
+					// In Java mode, include all frames
+					includeFrame = true;
+					LOGGER.fine( "Including frame (Java mode): " + frame.getName() );
+					break;
+
+				default:
+					LOGGER.warning( "Unknown debug mode: " + mode + ", defaulting to BoxLang mode" );
+					includeFrame = frame.isBoxLangFrame();
+					break;
+			}
+
+			if ( includeFrame ) {
+				filteredFrames.add( frame );
+			}
+		}
+
+		LOGGER.info( "Filtered " + frames.size() + " frames to " + filteredFrames.size() + " frames in " + mode + " mode" );
+		return filteredFrames;
 	}
 
 	/**

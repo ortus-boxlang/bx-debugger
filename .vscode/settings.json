@@ -6,7 +6,7 @@
 	"java.project.explorer.showNonJavaResources": true,
 	"java.compile.nullAnalysis.mode": "automatic",
 	"java.debug.settings.onBuildFailureProceed": true,
-	"java.jdt.ls.vmargs": "-XX:+UseParallelGC -XX:GCTimeRatio=4 -XX:AdaptiveSizePolicyWeight=90 -Dsun.zip.disableMemoryMapping=true -Xmx2G -Xms100m -Xlog:disable",
+	"java.jdt.ls.vmargs": "-XX:+UseParallelGC -XX:GCTimeRatio=4 -XX:AdaptiveSizePolicyWeight=90 -Dsun.zip.disableMemoryMapping=true -Xmx4G -Xms100m -Xlog:disable",
 	"java.dependency.syncWithFolderExplorer": true,
 	"[java]": {
 		"editor.formatOnSave": true,
@@ -18,4 +18,3 @@
 		"source.organizeImports": "explicit"
 	}
 }
-
