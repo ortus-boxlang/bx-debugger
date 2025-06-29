@@ -25,6 +25,7 @@ import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.StoppedEventArguments;
+import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
@@ -116,10 +117,8 @@ public class BreakpointPauseTest {
 			clientSocket.connect( new InetSocketAddress( "localhost", TEST_PORT ) );
 			assertTrue( clientSocket.isConnected(), "Should connect to debug server" );
 
-			// Create LSP4J launcher
-			Launcher<IDebugProtocolServer> launcher = Launcher.createLauncher(
+			Launcher<IDebugProtocolServer> launcher = DSPLauncher.createClientLauncher(
 			    breakpointClient,
-			    IDebugProtocolServer.class,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);
@@ -188,7 +187,7 @@ public class BreakpointPauseTest {
 			LOGGER.info( "Breakpoint pause test integration completed successfully" );
 
 		} catch ( Exception e ) {
-			fail( "Breakpoint pause test integration failed: " + e.getMessage() );
+			fail( e );
 		}
 	}
 

@@ -26,6 +26,7 @@ import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
@@ -121,9 +122,8 @@ public class BoxDebuggerIntegrationTest {
 			DebugClient						debugClient	= new DebugClient();
 
 			// Create LSP4J launcher for debug protocol
-			Launcher<IDebugProtocolServer>	launcher	= Launcher.createLauncher(
+			Launcher<IDebugProtocolServer>	launcher	= DSPLauncher.createClientLauncher(
 			    debugClient,
-			    IDebugProtocolServer.class,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);

@@ -1,15 +1,21 @@
 package ortus.boxlang.moduleslug;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
+import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 
@@ -137,11 +143,21 @@ public class BoxDebugger {
 			// Create the debug server instance
 			BoxDebugServer					debugServer	= new BoxDebugServer();
 
+			String							timestamp	= new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
+			FileOutputStream				debugFile	= new FileOutputStream( "debug-messages-" + timestamp + ".log" );
+
+			// Create TeeInputStream to capture incoming messages
+			// TeeInputStream teeInputStream = new TeeInputStream(
+			// clientSocket.socket().getInputStream(),
+			// debugFile,
+			// true // Enable message logging
+			// );
+
 			// Create the LSP4J launcher for the debug adapter protocol
-			Launcher<IDebugProtocolClient>	launcher	= Launcher.createLauncher(
+			Launcher<IDebugProtocolClient>	launcher	= DSPLauncher.createServerLauncher(
 			    debugServer,
-			    IDebugProtocolClient.class,
 			    clientSocket.socket().getInputStream(),
+			    // teeInputStream,
 			    clientSocket.socket().getOutputStream()
 			);
 
@@ -164,4 +180,127 @@ public class BoxDebugger {
 			}
 		}
 	}
+
+	private static class TeeInputStream extends InputStream {
+
+		private static final Logger	LOGGER	= Logger.getLogger( TeeInputStream.class.getName() );
+
+		private final InputStream	source;
+		private final OutputStream	tee;
+		private final StringBuilder	buffer;
+		private final boolean		logMessages;
+
+		public TeeInputStream( InputStream source, OutputStream tee, boolean logMessages ) {
+			this.source			= source;
+			this.tee			= tee;
+			this.buffer			= new StringBuilder();
+			this.logMessages	= logMessages;
+		}
+
+		@Override
+		public int read() throws IOException {
+			int data = source.read();
+			if ( data != -1 ) {
+				tee.write( data );
+				tee.flush();
+
+				if ( logMessages ) {
+					char c = ( char ) data;
+					buffer.append( c );
+
+					// Log complete JSON-RPC messages (end with newline or closing brace)
+					if ( c == '\n' || ( c == '}' && isCompleteMessage() ) ) {
+						String message = buffer.toString().trim();
+						if ( !message.isEmpty() ) {
+							LOGGER.info( "Incoming JSON-RPC: " + message );
+						}
+						buffer.setLength( 0 );
+					}
+				}
+			}
+			return data;
+		}
+
+		@Override
+		public int read( byte[] b, int off, int len ) throws IOException {
+			int bytesRead = source.read( b, off, len );
+			if ( bytesRead > 0 ) {
+				tee.write( b, off, bytesRead );
+				tee.flush();
+
+				if ( logMessages ) {
+					String chunk = new String( b, off, bytesRead );
+					buffer.append( chunk );
+
+					// Check if we have complete messages to log
+					String		content	= buffer.toString();
+					String[]	lines	= content.split( "\n" );
+
+					for ( int i = 0; i < lines.length - 1; i++ ) {
+						String line = lines[ i ].trim();
+						if ( !line.isEmpty() ) {
+							LOGGER.info( "Incoming JSON-RPC: " + line );
+						}
+					}
+
+					// Keep the last incomplete line in the buffer
+					buffer.setLength( 0 );
+					if ( lines.length > 0 ) {
+						buffer.append( lines[ lines.length - 1 ] );
+					}
+				}
+			}
+			return bytesRead;
+		}
+
+		private boolean isCompleteMessage() {
+			String content = buffer.toString().trim();
+			if ( content.startsWith( "{" ) ) {
+				int braceCount = 0;
+				for ( char c : content.toCharArray() ) {
+					if ( c == '{' )
+						braceCount++;
+					else if ( c == '}' )
+						braceCount--;
+				}
+				return braceCount == 0;
+			}
+			return false;
+		}
+
+		@Override
+		public void close() throws IOException {
+			try {
+				source.close();
+			} finally {
+				tee.close();
+			}
+		}
+
+		@Override
+		public int available() throws IOException {
+			return source.available();
+		}
+
+		@Override
+		public boolean markSupported() {
+			return source.markSupported();
+		}
+
+		@Override
+		public void mark( int readlimit ) {
+			source.mark( readlimit );
+		}
+
+		@Override
+		public void reset() throws IOException {
+			source.reset();
+		}
+
+		@Override
+		public long skip( long n ) throws IOException {
+			return source.skip( n );
+		}
+	}
+
 }

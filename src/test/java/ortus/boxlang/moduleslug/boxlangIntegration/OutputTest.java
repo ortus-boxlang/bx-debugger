@@ -22,6 +22,7 @@ import java.util.logging.Logger;
 import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
+import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
@@ -112,10 +113,8 @@ public class OutputTest {
 			clientSocket.connect( new InetSocketAddress( "localhost", TEST_PORT ) );
 			assertTrue( clientSocket.isConnected(), "Should connect to debug server" );
 
-			// Create LSP4J launcher
-			Launcher<IDebugProtocolServer> launcher = Launcher.createLauncher(
+			Launcher<IDebugProtocolServer> launcher = DSPLauncher.createClientLauncher(
 			    outputClient,
-			    IDebugProtocolServer.class,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);
