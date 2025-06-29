@@ -30,3 +30,16 @@ Here are some useful links:
 https://github.com/eclipse-lsp4j/lsp4j/blob/main/documentation/README.md
 https://github.com/eclipse-lsp4j/lsp4j/blob/main/documentation/jsonrpc.md
 https://microsoft.github.io/debug-adapter-protocol/specification
+
+## BoxLang StackFrames
+
+As this debugger is meant for BoxLang the debugger will need to be able to handle BoxLang specific stack frames. The `BoxLangStackFrame` class is used to represent a stack frame in BoxLang. It extends the `StackFrame` class from lsp4j and adds additional properties specific to BoxLang.
+
+The debugger will be able to run in two modes: "BoxLang" and "Java".
+
+In "BoxLang" mode (the defualt) only frames that are BoxLang specific will be returned.
+
+In "Java" mode, the debugger will return all frames, including Java frames. This is useful for debugging BoxLang code that calls Java code.
+
+In all cases, any frame that represents code that is located in a BoxLang source file will need to be translated in a way that a BoxLang developer would expect it.
+For example, in a BoxLang method there will be variable and various scopes. Ultimately, those variables and scopes are stored in an `IBoxContext` object (usually named "context") and the debugger will need to present them as if they are local variables in the stack frame.
