@@ -106,12 +106,23 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				String							classpath			= System.getProperty( "java.class.path" );
 				arguments.get( "options" ).setValue( "-cp \"" + classpath + "\"" );
 
-				// For testing, use our test class, otherwise use BoxRunner
-				if ( isTestEnvironment() ) {
-					arguments.get( "main" ).setValue( "ortus.boxlang.moduleslug.TestOutputProducer " + program );
-				} else {
-					arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner " + program );
+				StringBuilder command = new StringBuilder();
+				command.append( "ortus.boxlang.runtime.BoxRunner " + program );
+
+				String bxHome = ( String ) args.get( "bx-home" );
+				if ( bxHome != null ) {
+					command.append( " --bx-home" );
+					command.append( " " + bxHome );
 				}
+
+				arguments.get( "main" ).setValue( command.toString() );
+
+				// For testing, use our test class, otherwise use BoxRunner
+				// if ( isTestEnvironment() ) {
+				// arguments.get( "main" ).setValue( "ortus.boxlang.moduleslug.TestOutputProducer " + program );
+				// } else {
+				// arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner " + program );
+				// }
 
 				// Launch the VM
 				vm = launchingConnector.launch( arguments );

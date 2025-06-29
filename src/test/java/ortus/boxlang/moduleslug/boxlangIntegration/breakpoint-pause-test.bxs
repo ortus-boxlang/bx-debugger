@@ -1,0 +1,12 @@
+// this is a script file for testing breakpoints
+// it contains a simple function that returns the sum of two numbers
+function add(a, b) {
+    
+    // set a breakpoint here to test the debugger
+    // once the pause event is triggered, you can end the test
+    return a + b; // return the sum of a and b
+}
+
+res = add( 3, 5 );
+
+println( res )

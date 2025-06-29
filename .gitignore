@@ -13,3 +13,4 @@ bin/**
 /libs/
 src/test/resources/libs/*
 !src/test/resources/libs/.gitkeep
+src/test/resources/boxlang_home

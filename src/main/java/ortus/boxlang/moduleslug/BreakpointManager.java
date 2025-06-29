@@ -133,9 +133,9 @@ public class BreakpointManager {
 
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
-		classPrepareRequest.addClassFilter( "ortus.boxlang.moduleslug.*" );
+		classPrepareRequest.addClassFilter( "boxgenerated.*" );
 		classPrepareRequest.enable();
-		LOGGER.info( "Set up class prepare events for ortus.boxlang.moduleslug.*" );
+		LOGGER.info( "Set up class prepare events for boxgenerated.*" );
 	}
 
 	/**
@@ -380,13 +380,9 @@ public class BreakpointManager {
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
 
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			if ( refType.name().equals( "ortus.boxlang.moduleslug.TestOutputProducer" ) ) {
-				LOGGER.info( "Attempting to set pending breakpoint for loaded class: " + refType.name() );
-
-				if ( trySetBreakpointOnLoadedClass( pending.filePath, pending.lineNumber ) ) {
-					toRemove.add( pending );
-					LOGGER.info( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
-				}
+			if ( trySetBreakpointOnLoadedClass( pending.filePath, pending.lineNumber ) ) {
+				toRemove.add( pending );
+				LOGGER.info( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
 			}
 		}
 
