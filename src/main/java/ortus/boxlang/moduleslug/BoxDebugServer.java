@@ -35,7 +35,7 @@ import com.sun.jdi.connect.LaunchingConnector;
  */
 public class BoxDebugServer implements IDebugProtocolServer {
 
-	private static final Logger		LOGGER			= Logger.getLogger( BoxDebugServer.class.getName() );
+	private static final Logger		LOGGER				= Logger.getLogger( BoxDebugServer.class.getName() );
 
 	// Debug session state
 	private VirtualMachine			vm;
@@ -45,9 +45,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private BreakpointManager		breakpointManager;
 
 	// Exit handling state
-	private volatile boolean		sessionActive	= false;
-	private volatile boolean		sessionCleaned	= false;
-	private final Object			exitLock		= new Object();
+	private volatile boolean		sessionActive		= false;
+	private volatile boolean		sessionCleaned		= false;
+	private volatile boolean		terminatedEventSent	= false;
+	private final Object			exitLock			= new Object();
 
 	/**
 	 * Connect to the language client
@@ -375,6 +376,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			LOGGER.info( "Handling program exit with code: " + exitCode );
 
+			// Send terminated event first (if not already sent)
+			sendTerminatedEvent();
+
 			// Send exited event to client if we have a client connection
 			if ( client != null ) {
 				try {
@@ -389,6 +393,49 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Perform cleanup
 			performSessionCleanup();
+		}
+	}
+
+	/**
+	 * Handle user-initiated termination and send DAP terminated event to client
+	 */
+	public void handleTermination() {
+		synchronized ( exitLock ) {
+			// Only process termination once
+			if ( sessionCleaned ) {
+				LOGGER.info( "Session already cleaned, ignoring termination request" );
+				return;
+			}
+
+			LOGGER.info( "Handling user-initiated termination" );
+
+			// Send terminated event
+			sendTerminatedEvent();
+
+			// Perform cleanup
+			performSessionCleanup();
+		}
+	}
+
+	/**
+	 * Send terminated event to client
+	 */
+	private void sendTerminatedEvent() {
+		// Only send terminated event once
+		if ( terminatedEventSent ) {
+			LOGGER.info( "Terminated event already sent, skipping" );
+			return;
+		}
+
+		if ( client != null ) {
+			try {
+				org.eclipse.lsp4j.debug.TerminatedEventArguments terminatedArgs = new org.eclipse.lsp4j.debug.TerminatedEventArguments();
+				client.terminated( terminatedArgs );
+				terminatedEventSent = true;
+				LOGGER.info( "Sent terminated event to client" );
+			} catch ( Exception e ) {
+				LOGGER.warning( "Failed to send terminated event to client: " + e.getMessage() );
+			}
 		}
 	}
 
