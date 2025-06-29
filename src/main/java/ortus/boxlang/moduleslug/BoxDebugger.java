@@ -1,14 +1,11 @@
 package ortus.boxlang.moduleslug;
 
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -143,8 +140,8 @@ public class BoxDebugger {
 			// Create the debug server instance
 			BoxDebugServer					debugServer	= new BoxDebugServer();
 
-			String							timestamp	= new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
-			FileOutputStream				debugFile	= new FileOutputStream( "debug-messages-" + timestamp + ".log" );
+			// String timestamp = new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
+			// FileOutputStream debugFile = new FileOutputStream( "debug-messages-" + timestamp + ".log" );
 
 			// Create TeeInputStream to capture incoming messages
 			// TeeInputStream teeInputStream = new TeeInputStream(
