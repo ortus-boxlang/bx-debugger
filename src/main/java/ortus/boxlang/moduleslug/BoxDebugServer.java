@@ -23,6 +23,7 @@ import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StackTraceArguments;
 import org.eclipse.lsp4j.debug.StackTraceResponse;
+import org.eclipse.lsp4j.debug.ThreadsResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
@@ -574,10 +575,71 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			breakpointManager.continueExecution( args.getThreadId() );
 
 			LOGGER.info( "Continue request completed for thread: " + args.getThreadId() );
-			
+
 			ContinueResponse response = new ContinueResponse();
 			response.setAllThreadsContinued( true ); // Indicate that all threads will continue
 			return response;
+		} );
+	}
+
+	@Override
+	public CompletableFuture<ThreadsResponse> threads() {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Threads request received" );
+
+			ThreadsResponse response = new ThreadsResponse();
+
+			if ( vm == null ) {
+				LOGGER.info( "No active VM - returning empty threads list" );
+				response.setThreads( new org.eclipse.lsp4j.debug.Thread[ 0 ] );
+				return response;
+			}
+
+			try {
+				// Get all threads from the JDI virtual machine
+				List<com.sun.jdi.ThreadReference>		jdiThreads	= vm.allThreads();
+				List<org.eclipse.lsp4j.debug.Thread>	dapThreads	= new ArrayList<>();
+
+				LOGGER.info( "Found " + jdiThreads.size() + " threads in VM" );
+
+				for ( com.sun.jdi.ThreadReference jdiThread : jdiThreads ) {
+					try {
+						org.eclipse.lsp4j.debug.Thread dapThread = new org.eclipse.lsp4j.debug.Thread();
+
+						// Set thread ID (using JDI thread's unique ID)
+						dapThread.setId( ( int ) jdiThread.uniqueID() );
+
+						// Set thread name
+						String threadName = jdiThread.name();
+						if ( threadName == null || threadName.trim().isEmpty() ) {
+							threadName = "Thread-" + jdiThread.uniqueID();
+						}
+						dapThread.setName( threadName );
+
+						dapThreads.add( dapThread );
+
+						LOGGER.fine( "Added thread: ID=" + dapThread.getId() + ", Name=" + dapThread.getName() );
+
+					} catch ( Exception e ) {
+						LOGGER.warning( "Error processing thread " + jdiThread.uniqueID() + ": " + e.getMessage() );
+						// Continue processing other threads
+					}
+				}
+
+				// Convert to array and set response
+				response.setThreads( dapThreads.toArray( new org.eclipse.lsp4j.debug.Thread[ 0 ] ) );
+
+				LOGGER.info( "Threads request completed - returning " + dapThreads.size() + " threads" );
+				return response;
+
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error processing threads request: " + e.getMessage() );
+				e.printStackTrace();
+
+				// Return empty response on error
+				response.setThreads( new org.eclipse.lsp4j.debug.Thread[ 0 ] );
+				return response;
+			}
 		} );
 	}
 }
