@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
@@ -43,6 +44,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private Process					debuggedProcess;
 	private ExecutorService			outputMonitorExecutor;
 	private BreakpointManager		breakpointManager;
+	
+	// Exit handling state
+	private volatile boolean		sessionActive = false;
+	private volatile boolean		sessionCleaned = false;
+	private final Object			exitLock = new Object();
 
 	/**
 	 * Connect to the language client
@@ -157,6 +163,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 				// Start output monitoring using the VM's process
 				startOutputMonitoring();
+				
+				// Mark session as active and start process monitoring
+				sessionActive = true;
+				sessionCleaned = false;
+				startProcessMonitoring();
 
 				return null;
 			} catch ( Exception e ) {
@@ -197,10 +208,44 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Monitor stderr
 			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
-
-			LOGGER.info( "Started output monitoring for debugged VM process" );
+		}
+	}
+	
+	/**
+	 * Start monitoring the debugged process for exit events
+	 */
+	private void startProcessMonitoring() {
+		if (vm != null && vm.process() != null) {
+			Process process = vm.process();
+			debuggedProcess = process;
+			
+			// Monitor process termination in a separate thread
+			if (outputMonitorExecutor == null) {
+				outputMonitorExecutor = Executors.newFixedThreadPool(3); // Increased for process monitoring
+			}
+			
+			outputMonitorExecutor.submit(() -> {
+				try {
+					LOGGER.info("Starting process exit monitoring");
+					int exitCode = process.waitFor();
+					LOGGER.info("Debugged process exited with code: " + exitCode);
+					
+					// Handle the program exit
+					handleProgramExit(exitCode);
+					
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					LOGGER.info("Process monitoring interrupted");
+					// If interrupted, assume abnormal termination
+					handleProgramExit(-1);
+				} catch (Exception e) {
+					LOGGER.severe("Error monitoring process exit: " + e.getMessage());
+					// On error, assume abnormal termination
+					handleProgramExit(-1);
+				}
+			});
 		} else {
-			LOGGER.warning( "Could not start output monitoring - VM or process is null" );
+			LOGGER.warning("Cannot start process monitoring - VM or process is null");
 		}
 	}
 
@@ -276,37 +321,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 */
 	public void cleanup() {
 		LOGGER.info( "Cleaning up debug session resources" );
-
-		// Stop breakpoint manager
-		if ( breakpointManager != null ) {
-			breakpointManager.stopEventProcessing();
-			breakpointManager.clearAllBreakpoints();
-			breakpointManager = null;
-		}
-
-		// Shutdown output monitoring
-		if ( outputMonitorExecutor != null ) {
-			outputMonitorExecutor.shutdownNow();
-			outputMonitorExecutor = null;
-		}
-
-		// Terminate debugged process if still running
-		if ( debuggedProcess != null && debuggedProcess.isAlive() ) {
-			debuggedProcess.destroyForcibly();
-			debuggedProcess = null;
-		}
-
-		// Clean up VM if present
-		if ( vm != null ) {
-			try {
-				vm.exit( 0 );
-			} catch ( Exception e ) {
-				LOGGER.warning( "Error closing VM: " + e.getMessage() );
-			}
-			vm = null;
-		}
-
-		LOGGER.info( "Debug session cleanup completed" );
+		
+		// Use our exit handling cleanup mechanism
+		performSessionCleanup();
 	}
 
 	@Override
@@ -342,5 +359,112 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return response;
 			}
 		} );
+	}
+	
+	/**
+	 * Handle program exit events and send DAP exited event to client
+	 * @param exitCode The exit code of the program
+	 */
+	public void handleProgramExit(int exitCode) {
+		synchronized (exitLock) {
+			// Only process exit once
+			if (sessionCleaned) {
+				LOGGER.info("Exit event already processed, ignoring additional exit with code: " + exitCode);
+				return;
+			}
+			
+			LOGGER.info("Handling program exit with code: " + exitCode);
+			
+			// Send exited event to client if we have a client connection
+			if (client != null) {
+				try {
+					org.eclipse.lsp4j.debug.ExitedEventArguments exitArgs = new org.eclipse.lsp4j.debug.ExitedEventArguments();
+					exitArgs.setExitCode(exitCode);
+					client.exited(exitArgs);
+					LOGGER.info("Sent exited event to client with exit code: " + exitCode);
+				} catch (Exception e) {
+					LOGGER.warning("Failed to send exited event to client: " + e.getMessage());
+				}
+			}
+			
+			// Perform cleanup
+			performSessionCleanup();
+		}
+	}
+	
+	/**
+	 * Check if the debug session has been cleaned up
+	 * @return true if the session has been cleaned up
+	 */
+	public boolean isSessionCleaned() {
+		return sessionCleaned;
+	}
+	
+	/**
+	 * Perform cleanup of debug session resources
+	 */
+	private void performSessionCleanup() {
+		if (sessionCleaned) {
+			return;
+		}
+		
+		LOGGER.info("Performing debug session cleanup");
+		
+		try {
+			// Stop breakpoint event processing
+			if (breakpointManager != null) {
+				breakpointManager.stopEventProcessing();
+			}
+			
+			// Shutdown output monitoring
+			if (outputMonitorExecutor != null && !outputMonitorExecutor.isShutdown()) {
+				outputMonitorExecutor.shutdown();
+				try {
+					if (!outputMonitorExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+						outputMonitorExecutor.shutdownNow();
+					}
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					outputMonitorExecutor.shutdownNow();
+				}
+			}
+			
+			// Clean up VM
+			if (vm != null) {
+				try {
+					if (!vm.process().isAlive()) {
+						// Process is already dead, just dispose
+						vm.dispose();
+					} else {
+						// Try graceful exit first
+						vm.exit(0);
+					}
+				} catch (Exception e) {
+					LOGGER.warning("Error during VM cleanup: " + e.getMessage());
+					try {
+						vm.dispose();
+					} catch (Exception disposeError) {
+						LOGGER.warning("Error disposing VM: " + disposeError.getMessage());
+					}
+				}
+				vm = null;
+			}
+			
+			// Clean up process reference
+			debuggedProcess = null;
+			
+			// Mark session as inactive and cleaned
+			sessionActive = false;
+			sessionCleaned = true;
+			
+			LOGGER.info("Debug session cleanup completed");
+			
+		} catch (Exception e) {
+			LOGGER.severe("Error during session cleanup: " + e.getMessage());
+			e.printStackTrace();
+			// Ensure we still mark as cleaned even if cleanup partially failed
+			sessionActive = false;
+			sessionCleaned = true;
+		}
 	}
 }

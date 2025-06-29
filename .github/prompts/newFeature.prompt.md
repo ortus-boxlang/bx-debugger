@@ -1,5 +1,7 @@
 Implement a new feature.
 
+Before doing anything else run `git status` to check for uncommitted changes. If there are any, ask the user to commit or stash them before proceeding.
+
 Follow the steps below:
 
 1. Request the user to describe the feature they want to implement.
