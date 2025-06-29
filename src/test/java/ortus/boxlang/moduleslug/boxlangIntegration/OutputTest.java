@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.launch.DSPLauncher;
@@ -145,6 +146,12 @@ public class OutputTest {
 			// Launch and wait for execution
 			CompletableFuture<Void> launchResponse = debugServer.launch( launchArgs );
 			launchResponse.get( 10, TimeUnit.SECONDS );
+
+			// Send configuration done request
+			LOGGER.info( "Sending configuration done request" );
+			ConfigurationDoneArguments	configArgs			= new ConfigurationDoneArguments();
+			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
+			configDoneResult.get( 5, TimeUnit.SECONDS );
 
 			// Wait for output to be captured
 			Thread.sleep( 2000 );

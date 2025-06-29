@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
@@ -172,6 +173,12 @@ public class BreakpointPauseTest {
 			launchResponse.get( 10, TimeUnit.SECONDS );
 
 			LOGGER.info( "Program launched, waiting for stopped event..." );
+
+			// Send configuration done request
+			LOGGER.info( "Sending configuration done request" );
+			ConfigurationDoneArguments	configArgs			= new ConfigurationDoneArguments();
+			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
+			configDoneResult.get( 5, TimeUnit.SECONDS );
 
 			// Wait for the stopped event (breakpoint should be hit when add function is called)
 			assertTrue( breakpointClient.waitForStoppedEvent( 15 ),

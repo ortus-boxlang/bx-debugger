@@ -133,9 +133,10 @@ public class BreakpointManager {
 
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
+		// Listen for all classes to catch BoxLang generated classes with any pattern
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
 		classPrepareRequest.enable();
-		LOGGER.info( "Set up class prepare events for boxgenerated.*" );
+		LOGGER.info( "Set up class prepare events for all classes (to catch BoxLang generated classes)" );
 	}
 
 	/**
@@ -194,9 +195,7 @@ public class BreakpointManager {
 					LOGGER.info( "Found location at " + sourceName + ":" + lineNumber + " in class " + refType.name() );
 
 					// More flexible matching: check if the class name matches what we expect
-					if ( sourceName != null &&
-					    ( filePath.endsWith( sourceName ) ||
-					        refType.name().equals( "ortus.boxlang.moduleslug.TestOutputProducer" ) ) ) {
+					if ( sourceName != null && sourceName.equalsIgnoreCase( filePath ) ) {
 						return createBreakpointRequest( location, filePath, lineNumber );
 					}
 				}
@@ -312,25 +311,23 @@ public class BreakpointManager {
 					}
 				}
 
-				// Resume execution for non-breakpoint events
-				// For breakpoint events, we'll handle resume separately
+				// Only resume for non-breakpoint events
+				// For breakpoint events, the thread should remain suspended until continue is called
 				boolean			shouldResume	= true;
 				EventIterator	iter			= eventSet.eventIterator();
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
 					if ( evt instanceof BreakpointEvent ) {
-						shouldResume = false; // Don't auto-resume on breakpoint
+						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					}
 				}
 
 				if ( shouldResume ) {
 					eventSet.resume();
-				} else {
-					// For now, resume after a short delay to allow the stopped event to be sent
-					Thread.sleep( 500 );
-					eventSet.resume();
 				}
+				// If shouldResume is false (breakpoint hit), the thread stays suspended
+				// until the debugger client sends a continue/step request
 
 			} catch ( InterruptedException e ) {
 				LOGGER.info( "Event processing interrupted" );
@@ -375,6 +372,13 @@ public class BreakpointManager {
 	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
 		LOGGER.info( "Class loaded: " + refType.name() );
+
+		// Check if this is a BoxLang generated class
+		if ( refType.name().toLowerCase().contains( "box" ) || 
+		     refType.name().toLowerCase().contains( "generated" ) ||
+		     refType.name().toLowerCase().contains( "script" ) ) {
+			LOGGER.info( "Potential BoxLang class detected: " + refType.name() );
+		}
 
 		// Try to set any pending breakpoints for this class
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
@@ -652,5 +656,61 @@ public class BreakpointManager {
 		}
 
 		return stackFrames;
+	}
+
+	/**
+	 * Resume execution for the specified thread (called when continue is requested)
+	 */
+	public void continueExecution( int threadId ) {
+		if ( vm == null ) {
+			LOGGER.warning( "Virtual machine not available for continue" );
+			return;
+		}
+
+		try {
+			// Find the thread by ID
+			ThreadReference targetThread = null;
+			for ( ThreadReference thread : vm.allThreads() ) {
+				if ( thread.uniqueID() == threadId ) {
+					targetThread = thread;
+					break;
+				}
+			}
+
+			if ( targetThread == null ) {
+				LOGGER.warning( "Thread not found with ID: " + threadId );
+				return;
+			}
+
+			// Resume the thread if it's suspended
+			if ( targetThread.isSuspended() ) {
+				targetThread.resume();
+				LOGGER.info( "Resumed thread " + threadId );
+			} else {
+				LOGGER.info( "Thread " + threadId + " is not suspended, no action needed" );
+			}
+
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error resuming thread " + threadId + ": " + e.getMessage() );
+			e.printStackTrace();
+		}
+	}
+
+	/**
+	 * Resume execution for all threads (called when continue is requested without specific thread)
+	 */
+	public void continueAllExecution() {
+		if ( vm == null ) {
+			LOGGER.warning( "Virtual machine not available for continue" );
+			return;
+		}
+
+		try {
+			vm.resume();
+			LOGGER.info( "Resumed all threads" );
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error resuming all threads: " + e.getMessage() );
+			e.printStackTrace();
+		}
 	}
 }

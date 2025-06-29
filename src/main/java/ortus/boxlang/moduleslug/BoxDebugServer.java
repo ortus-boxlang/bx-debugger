@@ -14,6 +14,7 @@ import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ContinueResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
@@ -155,19 +156,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
 
-				// Set actual breakpoints for all pending breakpoints
-				verifyAndSetPendingBreakpoints();
-
-				// Start breakpoint event processing
-				breakpointManager.startEventProcessing();
-
-				// Start output monitoring using the VM's process
-				startOutputMonitoring();
-
-				// Mark session as active and start process monitoring
-				sessionActive	= true;
-				sessionCleaned	= false;
-				startProcessMonitoring();
+				client.initialized();
 
 				return null;
 			} catch ( Exception e ) {
@@ -514,5 +503,81 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			sessionActive	= false;
 			sessionCleaned	= true;
 		}
+	}
+
+	@Override
+	public CompletableFuture<Void> configurationDone( org.eclipse.lsp4j.debug.ConfigurationDoneArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Configuration done request received" );
+
+			// Set actual breakpoints for all pending breakpoints
+			verifyAndSetPendingBreakpoints();
+
+			// Start breakpoint event processing
+			breakpointManager.startEventProcessing();
+
+			// Start output monitoring using the VM's process
+			startOutputMonitoring();
+
+			// Mark session as active and start process monitoring
+			sessionActive	= true;
+			sessionCleaned	= false;
+			startProcessMonitoring();
+
+			// Mark that configuration is complete
+			// In a typical DAP flow, this signals that the client has finished sending
+			// initial configuration requests (like setting breakpoints) and the debugger
+			// can proceed with execution
+
+			// If we have a VM running and breakpoints are set, we can now proceed
+			if ( vm != null && breakpointManager != null ) {
+				LOGGER.info( "Configuration done: VM is running, breakpoints are ready" );
+
+				// Resume execution if the VM is suspended
+				// This is often needed in DAP implementations to continue execution
+				// after initial configuration is complete
+				try {
+					if ( vm.allThreads().stream().anyMatch( thread -> {
+						try {
+							return thread.isSuspended();
+						} catch ( Exception e ) {
+							return false;
+						}
+					} ) ) {
+						LOGGER.info( "Resuming suspended threads after configuration done" );
+						vm.resume();
+					}
+				} catch ( Exception e ) {
+					LOGGER.warning( "Could not resume VM after configuration done: " + e.getMessage() );
+				}
+
+			} else {
+				LOGGER.info( "Configuration done: No active VM yet, configuration will be applied when VM starts" );
+			}
+
+			LOGGER.info( "Configuration done request completed successfully" );
+			return null;
+		} );
+	}
+
+	@Override
+	public CompletableFuture<ContinueResponse> continue_( org.eclipse.lsp4j.debug.ContinueArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Continue request received for thread: " + args.getThreadId() );
+
+			if ( breakpointManager == null ) {
+				LOGGER.warning( "BreakpointManager not available for continue request" );
+				return new ContinueResponse();
+			}
+
+			// Resume execution for the specified thread
+			breakpointManager.continueExecution( args.getThreadId() );
+
+			LOGGER.info( "Continue request completed for thread: " + args.getThreadId() );
+			
+			ContinueResponse response = new ContinueResponse();
+			response.setAllThreadsContinued( true ); // Indicate that all threads will continue
+			return response;
+		} );
 	}
 }

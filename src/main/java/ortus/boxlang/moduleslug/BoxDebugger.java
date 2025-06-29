@@ -1,11 +1,14 @@
 package ortus.boxlang.moduleslug;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -140,23 +143,33 @@ public class BoxDebugger {
 			// Create the debug server instance
 			BoxDebugServer					debugServer	= new BoxDebugServer();
 
-			// String timestamp = new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
-			// FileOutputStream debugFile = new FileOutputStream( "debug-messages-" + timestamp + ".log" );
+			Launcher<IDebugProtocolClient>	launcher	= null;
 
-			// Create TeeInputStream to capture incoming messages
-			// TeeInputStream teeInputStream = new TeeInputStream(
-			// clientSocket.socket().getInputStream(),
-			// debugFile,
-			// true // Enable message logging
-			// );
+			if ( System.getProperty( "teeDAPInput" ) != null ) {
+				String				timestamp		= new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
+				FileOutputStream	debugFile		= new FileOutputStream( "debug-messages-" + timestamp + ".log" );
 
-			// Create the LSP4J launcher for the debug adapter protocol
-			Launcher<IDebugProtocolClient>	launcher	= DSPLauncher.createServerLauncher(
-			    debugServer,
-			    clientSocket.socket().getInputStream(),
-			    // teeInputStream,
-			    clientSocket.socket().getOutputStream()
-			);
+				// Create TeeInputStream to capture incoming messages
+				TeeInputStream		teeInputStream	= new TeeInputStream(
+				    clientSocket.socket().getInputStream(),
+				    debugFile,
+				    true // Enable message logging
+				);
+
+				// Create the LSP4J launcher for the debug adapter protocol
+				launcher = DSPLauncher.createServerLauncher(
+				    debugServer,
+				    // clientSocket.socket().getInputStream(),
+				    teeInputStream,
+				    clientSocket.socket().getOutputStream()
+				);
+			} else {
+				launcher = DSPLauncher.createServerLauncher(
+				    debugServer,
+				    clientSocket.socket().getInputStream(),
+				    clientSocket.socket().getOutputStream()
+				);
+			}
 
 			// Connect the debug server to the client
 			debugServer.connect( launcher.getRemoteProxy() );
