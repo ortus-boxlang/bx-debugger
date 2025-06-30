@@ -45,7 +45,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	// Debug session state
 	private VirtualMachine			vm;
 	private IDebugProtocolClient	client;
-	private Process					debuggedProcess;
 	private ExecutorService			outputMonitorExecutor;
 	private BreakpointManager		breakpointManager;
 	private SourceManager			sourceManager		= new SourceManager();
@@ -54,7 +53,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private String					debugMode			= "BoxLang"; // Default to BoxLang mode
 
 	// Exit handling state
-	private volatile boolean		sessionActive		= false;
 	private volatile boolean		sessionCleaned		= false;
 	private volatile boolean		terminatedEventSent	= false;
 	private final Object			exitLock			= new Object();
@@ -183,19 +181,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	/**
-	 * Check if we're running in a test environment
-	 */
-	private boolean isTestEnvironment() {
-		// Simple heuristic: check if junit is on the classpath
-		try {
-			Class.forName( "org.junit.jupiter.api.Test" );
-			return true;
-		} catch ( ClassNotFoundException e ) {
-			return false;
-		}
-	}
-
-	/**
 	 * Start monitoring output from the debugged VM process
 	 */
 	private void startOutputMonitoring() {
@@ -221,7 +206,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private void startProcessMonitoring() {
 		if ( vm != null && vm.process() != null ) {
 			Process process = vm.process();
-			debuggedProcess = process;
 
 			// Monitor process termination in a separate thread
 			if ( outputMonitorExecutor == null ) {
@@ -580,11 +564,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			// Clean up process reference
-			debuggedProcess	= null;
 
 			// Mark session as inactive and cleaned
-			sessionActive	= false;
-			sessionCleaned	= true;
+			sessionCleaned = true;
 
 			LOGGER.info( "Debug session cleanup completed" );
 
@@ -592,8 +574,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			LOGGER.severe( "Error during session cleanup: " + e.getMessage() );
 			e.printStackTrace();
 			// Ensure we still mark as cleaned even if cleanup partially failed
-			sessionActive	= false;
-			sessionCleaned	= true;
+			sessionCleaned = true;
 		}
 	}
 
@@ -612,8 +593,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			startOutputMonitoring();
 
 			// Mark session as active and start process monitoring
-			sessionActive	= true;
-			sessionCleaned	= false;
+			sessionCleaned = false;
 			startProcessMonitoring();
 
 			// Mark that configuration is complete
