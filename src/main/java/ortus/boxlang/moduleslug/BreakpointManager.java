@@ -105,10 +105,12 @@ public class BreakpointManager {
 
 		final String	filePath;
 		final int		lineNumber;
+		final int		breakpointId;
 
-		PendingBreakpointInfo( String filePath, int lineNumber ) {
-			this.filePath	= filePath;
-			this.lineNumber	= lineNumber;
+		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId ) {
+			this.filePath		= filePath;
+			this.lineNumber		= lineNumber;
+			this.breakpointId	= breakpointId;
 		}
 	}
 
@@ -142,24 +144,26 @@ public class BreakpointManager {
 	/**
 	 * Set a breakpoint at the specified file and line
 	 */
-	public boolean setBreakpoint( String filePath, int lineNumber ) {
+	public boolean setBreakpoint( PendingBreakpoint pending ) {
+		String	filePath	= pending.getFilePath();
+		int		lineNumber	= pending.getSourceBreakpoint().getLine();
 		try {
 			LOGGER.info( "Attempting to set breakpoint at " + filePath + ":" + lineNumber );
 
 			// If VM is not available, just add to pending breakpoints
 			if ( vm == null ) {
-				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber ) );
+				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.breakpoint.getId() ) );
 				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
 				return true;
 			}
 
 			// Try to set the breakpoint immediately if the class is already loaded
-			if ( trySetBreakpointOnLoadedClass( filePath, lineNumber ) ) {
+			if ( trySetBreakpointOnLoadedClass( pending.getBreakpoint().getId(), filePath, lineNumber ) ) {
 				return true;
 			}
 
 			// If not successful, add to pending breakpoints
-			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber ) );
+			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.getBreakpoint().getId() ) );
 			LOGGER.info( "Added breakpoint to pending list: " + filePath + ":" + lineNumber );
 			return true; // Return true since we'll set it when the class loads
 
@@ -173,7 +177,7 @@ public class BreakpointManager {
 	/**
 	 * Try to set a breakpoint on an already loaded class
 	 */
-	private boolean trySetBreakpointOnLoadedClass( String filePath, int lineNumber ) {
+	private boolean trySetBreakpointOnLoadedClass( int breakpointId, String filePath, int lineNumber ) {
 		// Require VM to be available
 		if ( vm == null ) {
 			return false;
@@ -196,7 +200,7 @@ public class BreakpointManager {
 
 					// More flexible matching: check if the class name matches what we expect
 					if ( sourceName != null && sourceName.equalsIgnoreCase( filePath ) ) {
-						return createBreakpointRequest( location, filePath, lineNumber );
+						return createBreakpointRequest( breakpointId, location, filePath, lineNumber );
 					}
 				}
 			} catch ( AbsentInformationException e ) {
@@ -219,7 +223,7 @@ public class BreakpointManager {
 	/**
 	 * Create a breakpoint request for the given location
 	 */
-	private boolean createBreakpointRequest( Location location, String filePath, int lineNumber ) {
+	private boolean createBreakpointRequest( int breakpointId, Location location, String filePath, int lineNumber ) {
 		try {
 			EventRequestManager	requestManager		= vm.eventRequestManager();
 			BreakpointRequest	breakpointRequest	= requestManager.createBreakpointRequest( location );
@@ -227,6 +231,7 @@ public class BreakpointManager {
 			// Enable the breakpoint
 			breakpointRequest.enable();
 			activeBreakpoints.add( breakpointRequest );
+			breakpointRequest.putProperty( "breakPointId", breakpointId );
 
 			LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
 			return true;
@@ -356,6 +361,7 @@ public class BreakpointManager {
 				stoppedArgs.setReason( "breakpoint" );
 				stoppedArgs.setDescription( "Paused on breakpoint" );
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
+				stoppedArgs.setHitBreakpointIds( new Integer[] { ( int ) event.request().getProperty( "breakPointId" ) } );
 
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
@@ -374,9 +380,9 @@ public class BreakpointManager {
 		LOGGER.info( "Class loaded: " + refType.name() );
 
 		// Check if this is a BoxLang generated class
-		if ( refType.name().toLowerCase().contains( "box" ) || 
-		     refType.name().toLowerCase().contains( "generated" ) ||
-		     refType.name().toLowerCase().contains( "script" ) ) {
+		if ( refType.name().toLowerCase().contains( "box" ) ||
+		    refType.name().toLowerCase().contains( "generated" ) ||
+		    refType.name().toLowerCase().contains( "script" ) ) {
 			LOGGER.info( "Potential BoxLang class detected: " + refType.name() );
 		}
 
@@ -384,7 +390,7 @@ public class BreakpointManager {
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
 
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			if ( trySetBreakpointOnLoadedClass( pending.filePath, pending.lineNumber ) ) {
+			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber ) ) {
 				toRemove.add( pending );
 				LOGGER.info( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
 			}
@@ -509,7 +515,7 @@ public class BreakpointManager {
 				String	filePath	= pending.getFilePath();
 				int		lineNumber	= pending.getSourceBreakpoint().getLine();
 
-				boolean	success		= setBreakpoint( filePath, lineNumber );
+				boolean	success		= setBreakpoint( pending );
 				if ( success ) {
 					// Mark breakpoint as verified
 					pending.getBreakpoint().setVerified( true );

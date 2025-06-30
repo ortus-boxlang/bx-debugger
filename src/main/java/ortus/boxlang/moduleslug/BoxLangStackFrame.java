@@ -14,12 +14,12 @@ public class BoxLangStackFrame extends StackFrame {
 	/**
 	 * Indicates whether this frame represents BoxLang source code
 	 */
-	private boolean	isBoxLangFrame;
+	private boolean		isBoxLangFrame;
 
 	/**
 	 * The BoxLang context object associated with this frame (if any)
 	 */
-	private Object	boxLangContext;
+	private Object		boxLangContext;
 
 	/**
 	 * The original Java stack frame this BoxLang frame is based on
@@ -41,8 +41,8 @@ public class BoxLangStackFrame extends StackFrame {
 	 */
 	public BoxLangStackFrame( StackFrame javaFrame ) {
 		super();
-		this.javaFrame = javaFrame;
-		this.isBoxLangFrame = false;
+		this.javaFrame		= javaFrame;
+		this.isBoxLangFrame	= false;
 
 		// Copy properties from the Java frame
 		if ( javaFrame != null ) {
@@ -51,6 +51,9 @@ public class BoxLangStackFrame extends StackFrame {
 			setLine( javaFrame.getLine() );
 			setColumn( javaFrame.getColumn() );
 			setSource( javaFrame.getSource() );
+			// the name and path values are flipped for some reason
+			// so we set the path to the name
+			getSource().setPath( javaFrame.getSource().getName() );
 			setEndLine( javaFrame.getEndLine() );
 			setEndColumn( javaFrame.getEndColumn() );
 			setModuleId( javaFrame.getModuleId() );
@@ -116,6 +119,7 @@ public class BoxLangStackFrame extends StackFrame {
 	 * Determine if the given frame represents BoxLang source code based on source path
 	 * 
 	 * @param frame the frame to check
+	 * 
 	 * @return true if the frame appears to be from BoxLang source
 	 */
 	public static boolean isBoxLangSourceFrame( StackFrame frame ) {
@@ -129,16 +133,20 @@ public class BoxLangStackFrame extends StackFrame {
 		}
 
 		// Check for BoxLang file extensions
-		return sourcePath.endsWith( ".bx" ) || 
-		       sourcePath.endsWith( ".bxs" ) || 
-		       sourcePath.endsWith( ".bxm" ) ||
-		       sourcePath.contains( "boxlang" );
+		return sourcePath.endsWith( ".bx" ) ||
+		    sourcePath.endsWith( ".bxs" ) ||
+		    sourcePath.endsWith( ".bxm" ) ||
+		    sourcePath.endsWith( ".cf" ) ||
+		    sourcePath.endsWith( ".cfs" ) ||
+		    sourcePath.endsWith( ".cfm" ) ||
+		    sourcePath.endsWith( ".cfml" );
 	}
 
 	/**
 	 * Create a BoxLang-specific frame from a standard frame
 	 * 
 	 * @param javaFrame the Java frame to convert
+	 * 
 	 * @return a BoxLangStackFrame with appropriate properties set
 	 */
 	public static BoxLangStackFrame fromJavaFrame( StackFrame javaFrame ) {

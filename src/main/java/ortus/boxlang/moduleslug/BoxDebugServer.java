@@ -19,7 +19,10 @@ import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
+import org.eclipse.lsp4j.debug.Source;
+import org.eclipse.lsp4j.debug.SourceArguments;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.SourceResponse;
 import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StackTraceArguments;
 import org.eclipse.lsp4j.debug.StackTraceResponse;
@@ -45,7 +48,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private Process					debuggedProcess;
 	private ExecutorService			outputMonitorExecutor;
 	private BreakpointManager		breakpointManager;
-	
+	private SourceManager			sourceManager		= new SourceManager();
+
 	// BoxLang debugging configuration
 	private String					debugMode			= "BoxLang"; // Default to BoxLang mode
 
@@ -351,7 +355,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Enhanced stack trace request handler that supports BoxLang and Java modes
 	 * 
 	 * @param threadId the thread ID to get stack frames for
-	 * @param mode the debug mode ("BoxLang" or "Java")
+	 * @param mode     the debug mode ("BoxLang" or "Java")
+	 * 
 	 * @return StackTraceResponse with filtered frames based on mode
 	 */
 	private StackTraceResponse handleStackTraceRequest( int threadId, String mode ) {
@@ -366,10 +371,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		try {
 			// Get all stack frames from the breakpoint manager
-			List<StackFrame> allFrames = breakpointManager.getStackFrames( threadId );
-			
+			List<StackFrame>		allFrames		= breakpointManager.getStackFrames( threadId );
+
 			// Convert to BoxLang stack frames and apply filtering based on mode
-			List<BoxLangStackFrame> boxLangFrames = new ArrayList<>();
+			List<BoxLangStackFrame>	boxLangFrames	= new ArrayList<>();
 			for ( StackFrame frame : allFrames ) {
 				BoxLangStackFrame boxFrame = BoxLangStackFrame.fromJavaFrame( frame );
 				boxLangFrames.add( boxFrame );
@@ -397,7 +402,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Filter stack frames based on the debug mode
 	 * 
 	 * @param frames the list of BoxLang stack frames
-	 * @param mode the debug mode ("BoxLang" or "Java")
+	 * @param mode   the debug mode ("BoxLang" or "Java")
+	 * 
 	 * @return filtered list of stack frames
 	 */
 	private List<StackFrame> filterStackFramesByMode( List<BoxLangStackFrame> frames, String mode ) {
@@ -407,7 +413,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			boolean includeFrame = false;
 
 			switch ( mode.toLowerCase() ) {
-				case "boxlang":
+				case "boxlang" :
 					// In BoxLang mode, only include frames that are from BoxLang source
 					includeFrame = frame.isBoxLangFrame();
 					if ( includeFrame ) {
@@ -415,13 +421,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					}
 					break;
 
-				case "java":
+				case "java" :
 					// In Java mode, include all frames
 					includeFrame = true;
 					LOGGER.fine( "Including frame (Java mode): " + frame.getName() );
 					break;
 
-				default:
+				default :
 					LOGGER.warning( "Unknown debug mode: " + mode + ", defaulting to BoxLang mode" );
 					includeFrame = frame.isBoxLangFrame();
 					break;
@@ -726,5 +732,55 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return response;
 			}
 		} );
+	}
+
+	@Override
+	public CompletableFuture<SourceResponse> source( SourceArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			try {
+				LOGGER.info( "Source request received for: " +
+				    ( args.getSource().getPath() != null ? args.getSource().getPath() : "sourceReference " + args.getSource().getSourceReference() ) );
+
+				return handleSourceRequest( args.getSource() );
+
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error processing source request: " + e.getMessage() );
+				e.printStackTrace();
+
+				// Return empty response on error
+				SourceResponse response = new SourceResponse();
+				response.setContent( "" );
+				return response;
+			}
+		} );
+	}
+
+	/**
+	 * Enhanced source request handler that retrieves source content
+	 * 
+	 * @param source the source to retrieve content for
+	 * 
+	 * @return SourceResponse with the source content
+	 */
+	private SourceResponse handleSourceRequest( Source source ) {
+		SourceResponse response = new SourceResponse();
+
+		try {
+			String content = sourceManager.getSourceContent( source );
+			response.setContent( content );
+
+			if ( source.getPath() != null ) {
+				LOGGER.info( "Retrieved source content for file: " + source.getPath() + " (length: " + content.length() + ")" );
+			} else {
+				LOGGER.info( "Retrieved source content for reference: " + source.getSourceReference() + " (length: " + content.length() + ")" );
+			}
+
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error in handleSourceRequest: " + e.getMessage() );
+			e.printStackTrace();
+			response.setContent( "" );
+		}
+
+		return response;
 	}
 }

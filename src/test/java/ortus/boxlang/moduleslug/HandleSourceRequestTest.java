@@ -1,5 +1,6 @@
 package ortus.boxlang.moduleslug;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -7,6 +8,9 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -16,9 +20,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
-import org.eclipse.lsp4j.debug.StackTraceArguments;
-import org.eclipse.lsp4j.debug.StackTraceResponse;
+import org.eclipse.lsp4j.debug.Source;
+import org.eclipse.lsp4j.debug.SourceArguments;
+import org.eclipse.lsp4j.debug.SourceResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
@@ -29,13 +35,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Test class for enhanced stack trace request handling in BoxDebugger
- * This test verifies that the debugger can properly handle stack trace requests
- * with BoxLang-specific filtering and mode support.
+ * Test class for source request handling in BoxDebugger
+ * This test verifies that the debugger can properly handle source requests
+ * and return appropriate source content for debugging sessions.
  */
-public class StackTraceRequestHandlingTest {
+public class HandleSourceRequestTest {
 
-	private static final Logger	LOGGER		= Logger.getLogger( StackTraceRequestHandlingTest.class.getName() );
+	private static final Logger	LOGGER		= Logger.getLogger( HandleSourceRequestTest.class.getName() );
 	private static final int	TEST_PORT	= 5011;
 	private ExecutorService		serverExecutor;
 	private ServerSocketChannel	serverSocket;
@@ -101,13 +107,12 @@ public class StackTraceRequestHandlingTest {
 	}
 
 	/**
-	 * Test debug client implementation for stack trace request testing
+	 * Test debug client implementation for source request testing
 	 */
 	public static class TestDebugClient implements IDebugProtocolClient {
 
 		private static final Logger LOGGER = Logger.getLogger( TestDebugClient.class.getName() );
 
-		// Implement required methods as no-ops for testing
 		@Override
 		public void initialized() {
 			LOGGER.info( "Debug client initialized" );
@@ -196,8 +201,8 @@ public class StackTraceRequestHandlingTest {
 
 	@Test
 	@Timeout( value = 30, unit = TimeUnit.SECONDS )
-	@DisplayName( "Test stack trace request handles BoxLang mode filtering" )
-	public void testStackTraceRequestBoxLangMode() throws Exception {
+	@DisplayName( "Test source request for existing file returns content" )
+	public void testSourceRequestForExistingFile() throws Exception {
 		// Wait for server to start
 		assertTrue( serverStartupLatch.await( 5, TimeUnit.SECONDS ), "Server should signal startup" );
 		Thread.sleep( 2000 );
@@ -220,50 +225,55 @@ public class StackTraceRequestHandlingTest {
 
 			// Initialize debug session
 			InitializeRequestArguments	initArgs	= new InitializeRequestArguments();
-			initArgs.setClientID( "stack-trace-test-client" );
-			initArgs.setClientName( "StackTraceRequestHandlingTest" );
+			initArgs.setClientID( "source-request-test-client" );
+			initArgs.setClientName( "HandleSourceRequestTest" );
 
 			CompletableFuture<Capabilities>	initFuture		= debugServer.initialize( initArgs );
 			Capabilities					capabilities	= initFuture.get( 5, TimeUnit.SECONDS );
 
 			assertNotNull( capabilities, "Should receive capabilities" );
+			LOGGER.info( "Received capabilities from debug server" );
 
-			// Launch a BoxLang program
-			Map<String, Object>		launchArgs		= Map.of(
-			    "program", "src/test/resources/breakpoint.bxs",
-			    "debugMode", "BoxLang" // Test BoxLang mode
-			);
+			// Launch the breakpoint.bxs program which should produce output
+			Map<String, Object>	launchArgs		= new HashMap<>();
+			Path				breakpointFile	= Paths.get( "src/test/resources/output.bxs" ).toAbsolutePath();
+			assertTrue( breakpointFile.toFile().exists(), "output.bxs should exist" );
 
-			CompletableFuture<Void>	launchFuture	= debugServer.launch( launchArgs );
-			launchFuture.get( 10, TimeUnit.SECONDS );
+			launchArgs.put( "program", breakpointFile.toString() );
+			launchArgs.put( "type", "boxlang" );
+			launchArgs.put( "bx-home", Paths.get( "src/test/resources/boxlang_home" ).toAbsolutePath().toString() );
 
-			LOGGER.info( "Program launched successfully in BoxLang mode" );
+			// Launch and wait for execution
+			CompletableFuture<Void> launchResponse = debugServer.launch( launchArgs );
+			launchResponse.get( 10, TimeUnit.SECONDS );
 
-			// Wait for VM to initialize
-			Thread.sleep( 3000 );
+			// Send configuration done request
+			LOGGER.info( "Sending configuration done request" );
+			ConfigurationDoneArguments	configArgs			= new ConfigurationDoneArguments();
+			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
+			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-			// Test stack trace request - should filter to BoxLang frames only
-			StackTraceArguments stackArgs = new StackTraceArguments();
-			stackArgs.setThreadId( 1 );
+			// Test source request for existing test file
+			SourceArguments	sourceArgs	= new SourceArguments();
+			Source			source		= new Source();
+			source.setPath( "src/test/resources/output.bxs" );
+			sourceArgs.setSource( source );
 
-			CompletableFuture<StackTraceResponse>	stackFuture		= debugServer.stackTrace( stackArgs );
-			StackTraceResponse						stackResponse	= stackFuture.get( 5, TimeUnit.SECONDS );
+			CompletableFuture<SourceResponse>	sourceFuture	= debugServer.source( sourceArgs );
+			SourceResponse						sourceResponse	= sourceFuture.get( 50, TimeUnit.SECONDS );
 
-			assertNotNull( stackResponse, "Should receive stack trace response" );
-			assertNotNull( stackResponse.getStackFrames(), "Stack frames should not be null" );
+			assertNotNull( sourceResponse, "Should receive source response" );
+			assertNotNull( sourceResponse.getContent(), "Source content should not be null" );
+			assertTrue( sourceResponse.getContent().length() > 0, "Source content should not be empty" );
 
-			// TODO add assertions to validate the values in stackResponse.getStackFrames()
-
-			// In BoxLang mode, we should only get BoxLang-specific frames
-			// This test validates the filtering logic exists
-			LOGGER.info( "Stack trace request completed in BoxLang mode with " + stackResponse.getStackFrames().length + " frames" );
+			LOGGER.info( "Source request completed successfully with content length: " + sourceResponse.getContent().length() );
 		}
 	}
 
 	@Test
 	@Timeout( value = 30, unit = TimeUnit.SECONDS )
-	@DisplayName( "Test stack trace request handles Java mode with all frames" )
-	public void testStackTraceRequestJavaMode() throws Exception {
+	@DisplayName( "Test source request for non-existent file returns empty content" )
+	public void testSourceRequestForNonExistentFile() throws Exception {
 		// Wait for server to start
 		assertTrue( serverStartupLatch.await( 5, TimeUnit.SECONDS ), "Server should signal startup" );
 		Thread.sleep( 2000 );
@@ -286,48 +296,35 @@ public class StackTraceRequestHandlingTest {
 
 			// Initialize debug session
 			InitializeRequestArguments	initArgs	= new InitializeRequestArguments();
-			initArgs.setClientID( "stack-trace-test-client" );
-			initArgs.setClientName( "StackTraceRequestHandlingTest" );
+			initArgs.setClientID( "source-request-test-client" );
+			initArgs.setClientName( "HandleSourceRequestTest" );
 
 			CompletableFuture<Capabilities>	initFuture		= debugServer.initialize( initArgs );
 			Capabilities					capabilities	= initFuture.get( 5, TimeUnit.SECONDS );
 
 			assertNotNull( capabilities, "Should receive capabilities" );
 
-			// Launch a BoxLang program
-			Map<String, Object>		launchArgs		= Map.of(
-			    "program", "src/test/resources/breakpoint.bxs",
-			    "debugMode", "Java" // Test Java mode
-			);
+			// Test source request for non-existent file
+			SourceArguments	sourceArgs	= new SourceArguments();
+			Source			source		= new Source();
+			source.setPath( "non/existent/file.bxs" );
+			sourceArgs.setSource( source );
 
-			CompletableFuture<Void>	launchFuture	= debugServer.launch( launchArgs );
-			launchFuture.get( 10, TimeUnit.SECONDS );
+			CompletableFuture<SourceResponse>	sourceFuture	= debugServer.source( sourceArgs );
+			SourceResponse						sourceResponse	= sourceFuture.get( 5, TimeUnit.SECONDS );
 
-			LOGGER.info( "Program launched successfully in Java mode" );
+			assertNotNull( sourceResponse, "Should receive source response" );
+			assertNotNull( sourceResponse.getContent(), "Source content should not be null" );
+			assertEquals( "", sourceResponse.getContent(), "Source content should be empty for non-existent file" );
 
-			// Wait for VM to initialize
-			Thread.sleep( 3000 );
-
-			// Test stack trace request - should return all frames including Java frames
-			StackTraceArguments stackArgs = new StackTraceArguments();
-			stackArgs.setThreadId( 1 );
-
-			CompletableFuture<StackTraceResponse>	stackFuture		= debugServer.stackTrace( stackArgs );
-			StackTraceResponse						stackResponse	= stackFuture.get( 5, TimeUnit.SECONDS );
-
-			assertNotNull( stackResponse, "Should receive stack trace response" );
-			assertNotNull( stackResponse.getStackFrames(), "Stack frames should not be null" );
-
-			// In Java mode, we should get all frames (BoxLang + Java)
-			// This test validates the mode-based filtering
-			LOGGER.info( "Stack trace request completed in Java mode with " + stackResponse.getStackFrames().length + " frames" );
+			LOGGER.info( "Source request for non-existent file handled correctly" );
 		}
 	}
 
 	@Test
 	@Timeout( value = 30, unit = TimeUnit.SECONDS )
-	@DisplayName( "Test stack trace request defaults to BoxLang mode" )
-	public void testStackTraceRequestDefaultsToBoxLangMode() throws Exception {
+	@DisplayName( "Test source request with sourceReference returns cached content" )
+	public void testSourceRequestWithSourceReference() throws Exception {
 		// Wait for server to start
 		assertTrue( serverStartupLatch.await( 5, TimeUnit.SECONDS ), "Server should signal startup" );
 		Thread.sleep( 2000 );
@@ -350,40 +347,31 @@ public class StackTraceRequestHandlingTest {
 
 			// Initialize debug session
 			InitializeRequestArguments	initArgs	= new InitializeRequestArguments();
-			initArgs.setClientID( "stack-trace-test-client" );
-			initArgs.setClientName( "StackTraceRequestHandlingTest" );
+			initArgs.setClientID( "source-request-test-client" );
+			initArgs.setClientName( "HandleSourceRequestTest" );
 
 			CompletableFuture<Capabilities>	initFuture		= debugServer.initialize( initArgs );
 			Capabilities					capabilities	= initFuture.get( 5, TimeUnit.SECONDS );
 
 			assertNotNull( capabilities, "Should receive capabilities" );
 
-			// Launch a BoxLang program without specifying debugMode (should default to BoxLang)
-			Map<String, Object>		launchArgs		= Map.of(
-			    "program", "src/test/resources/breakpoint.bxs"
-			// No debugMode specified - should default to BoxLang
-			);
+			// Test source request with sourceReference (for dynamically generated content)
+			SourceArguments	sourceArgs	= new SourceArguments();
+			Source			source		= new Source();
+			source.setSourceReference( 1 ); // Reference to dynamically generated content
+			source.setName( "generated-code.bxs" );
+			sourceArgs.setSource( source );
 
-			CompletableFuture<Void>	launchFuture	= debugServer.launch( launchArgs );
-			launchFuture.get( 10, TimeUnit.SECONDS );
+			CompletableFuture<SourceResponse>	sourceFuture	= debugServer.source( sourceArgs );
+			SourceResponse						sourceResponse	= sourceFuture.get( 5, TimeUnit.SECONDS );
 
-			LOGGER.info( "Program launched successfully with default mode" );
+			assertNotNull( sourceResponse, "Should receive source response" );
+			assertNotNull( sourceResponse.getContent(), "Source content should not be null" );
+			// For this test, we expect the handler to return a placeholder message for unknown references
+			assertTrue( sourceResponse.getContent().contains( "not available" ) || sourceResponse.getContent().isEmpty(),
+			    "Source content should indicate unavailable content or be empty" );
 
-			// Wait for VM to initialize
-			Thread.sleep( 3000 );
-
-			// Test stack trace request - should default to BoxLang mode filtering
-			StackTraceArguments stackArgs = new StackTraceArguments();
-			stackArgs.setThreadId( 1 );
-
-			CompletableFuture<StackTraceResponse>	stackFuture		= debugServer.stackTrace( stackArgs );
-			StackTraceResponse						stackResponse	= stackFuture.get( 5, TimeUnit.SECONDS );
-
-			assertNotNull( stackResponse, "Should receive stack trace response" );
-			assertNotNull( stackResponse.getStackFrames(), "Stack frames should not be null" );
-
-			// Should default to BoxLang mode behavior
-			LOGGER.info( "Stack trace request completed with default mode - " + stackResponse.getStackFrames().length + " frames" );
+			LOGGER.info( "Source request with sourceReference handled correctly" );
 		}
 	}
 }
