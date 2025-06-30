@@ -20,7 +20,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Capabilities;
-import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceArguments;
@@ -248,10 +247,7 @@ public class HandleSourceRequestTest {
 			launchResponse.get( 10, TimeUnit.SECONDS );
 
 			// Send configuration done request
-			LOGGER.info( "Sending configuration done request" );
-			ConfigurationDoneArguments	configArgs			= new ConfigurationDoneArguments();
-			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
-			configDoneResult.get( 5, TimeUnit.SECONDS );
+			DAPTestUtils.sendConfigurationDone( debugServer );
 
 			// Test source request for existing test file
 			SourceArguments	sourceArgs	= new SourceArguments();
