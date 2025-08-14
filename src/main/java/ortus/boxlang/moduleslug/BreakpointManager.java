@@ -211,12 +211,6 @@ public class BreakpointManager {
 
 		LOGGER.info( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
 
-		// List all available classes for debugging
-		LOGGER.info( "Available classes:" );
-		for ( ReferenceType refType : classes ) {
-			LOGGER.info( "  " + refType.name() );
-		}
-
 		return false;
 	}
 

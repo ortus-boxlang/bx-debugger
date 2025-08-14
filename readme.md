@@ -26,6 +26,12 @@ This module provides a Debug Adapter Protocol (DAP) compliant debugger for BoxLa
 - **Thread Management**: Support for multi-threaded debugging scenarios
 - **DAP Compliance**: Full compatibility with Debug Adapter Protocol specifications
 
+## Testing
+
+You can test this project by running multiple debuggers.
+
+Start by downloading all dependencies and making sure the project runs. Next, run the `BoxDebugger` launch configuration. This will start up the debug module. Once running you will be able to connect to it on port `9898`. In the "Run and Debug" panel switch to `BoxDebugger - RunBoxLang File` and change the editor to the file you want to execute. Start the new debug session and VSCode will now be in control of both the java execution and the boxlang execution.
+
 ### Stack Information Feature
 
 The debugger provides comprehensive stack trace information when execution is paused at breakpoints:

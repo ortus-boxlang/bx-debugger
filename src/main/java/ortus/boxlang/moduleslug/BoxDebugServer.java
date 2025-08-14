@@ -17,6 +17,9 @@ import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.ContinueResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
+import org.eclipse.lsp4j.debug.Scope;
+import org.eclipse.lsp4j.debug.ScopesArguments;
+import org.eclipse.lsp4j.debug.ScopesResponse;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
@@ -27,6 +30,8 @@ import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StackTraceArguments;
 import org.eclipse.lsp4j.debug.StackTraceResponse;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
+import org.eclipse.lsp4j.debug.VariablesArguments;
+import org.eclipse.lsp4j.debug.VariablesResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
@@ -332,6 +337,64 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				response.setTotalFrames( 0 );
 				return response;
 			}
+		} );
+	}
+
+	@Override
+	public CompletableFuture<ScopesResponse> scopes( ScopesArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			try {
+				LOGGER.info( "Scopes request received for frame: " + args.getFrameId() );
+
+				ScopesResponse	response	= new ScopesResponse();
+				List<Scope>		scopes		= new ArrayList<>();
+
+				// For now, we'll provide a basic server scope implementation
+				// In the future, this could be enhanced to extract actual BoxLang context
+				if ( args.getFrameId() >= 0 ) {
+					// Create server scope
+					Scope serverScope = new Scope();
+					serverScope.setName( "server" );
+					serverScope.setVariablesReference( 1000 + args.getFrameId() ); // Generate unique reference
+					serverScope.setExpensive( false );
+					serverScope.setPresentationHint( "data" );
+
+					scopes.add( serverScope );
+
+					LOGGER.info( "Created server scope with variables reference: " + serverScope.getVariablesReference() );
+				} else {
+					LOGGER.warning( "Invalid frame ID provided: " + args.getFrameId() );
+				}
+
+				response.setScopes( scopes.toArray( new Scope[ 0 ] ) );
+
+				LOGGER.info( "Returning " + scopes.size() + " scopes for frame " + args.getFrameId() );
+				return response;
+
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error processing scopes request: " + e.getMessage() );
+				e.printStackTrace();
+
+				// Return empty response on error
+				ScopesResponse response = new ScopesResponse();
+				response.setScopes( new Scope[ 0 ] );
+				return response;
+			}
+		} );
+	}
+
+	@Override
+	public CompletableFuture<VariablesResponse> variables( VariablesArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Variables request received for variables reference: " + args.getVariablesReference() );
+
+			// For now, we will return an empty response
+			VariablesResponse response = new VariablesResponse();
+			response.setVariables( new org.eclipse.lsp4j.debug.Variable[ 0 ] );
+
+			// In a real implementation, you would retrieve variables based on the reference
+			LOGGER.info( "Returning empty variables response for reference: " + args.getVariablesReference() );
+			return response;
 		} );
 	}
 
