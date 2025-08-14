@@ -45,24 +45,24 @@ import com.sun.jdi.connect.LaunchingConnector;
  */
 public class BoxDebugServer implements IDebugProtocolServer {
 
-	private static final Logger		LOGGER				= Logger.getLogger( BoxDebugServer.class.getName() );
+	private static final Logger								LOGGER					= Logger.getLogger( BoxDebugServer.class.getName() );
 
 	// Debug session state
-	private VirtualMachine			vm;
-	private IDebugProtocolClient	client;
-	private ExecutorService			outputMonitorExecutor;
-	private BreakpointManager		breakpointManager;
-	private SourceManager			sourceManager		= new SourceManager();
+	private VirtualMachine									vm;
+	private IDebugProtocolClient							client;
+	private ExecutorService									outputMonitorExecutor;
+	private BreakpointManager								breakpointManager;
+	private SourceManager									sourceManager			= new SourceManager();
 	// Ensure we only start output monitoring once per session
-	private final java.util.concurrent.atomic.AtomicBoolean outputMonitoringStarted = new java.util.concurrent.atomic.AtomicBoolean( false );
+	private final java.util.concurrent.atomic.AtomicBoolean	outputMonitoringStarted	= new java.util.concurrent.atomic.AtomicBoolean( false );
 
 	// BoxLang debugging configuration
-	private String					debugMode			= "BoxLang"; // Default to BoxLang mode
+	private String											debugMode				= "BoxLang"; // Default to BoxLang mode
 
 	// Exit handling state
-	private volatile boolean		sessionCleaned		= false;
-	private volatile boolean		terminatedEventSent	= false;
-	private final Object			exitLock			= new Object();
+	private volatile boolean								sessionCleaned			= false;
+	private volatile boolean								terminatedEventSent		= false;
+	private final Object									exitLock				= new Object();
 
 	/**
 	 * Connect to the language client
@@ -443,10 +443,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			// Filter frames based on debug mode
-			List<StackFrame> filteredFrames = filterStackFramesByMode( boxLangFrames, mode );
+			List<StackFrame>	filteredFrames	= filterStackFramesByMode( boxLangFrames, mode );
 
 			// Set total before pagination
-			int total = filteredFrames.size();
+			int					total			= filteredFrames.size();
 			response.setTotalFrames( total );
 
 			// Apply pagination per DAP (startFrame default 0; levels optional)
@@ -465,7 +465,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			response.setStackFrames( page.toArray( new StackFrame[ 0 ] ) );
 
-			LOGGER.info( "Returning " + page.size() + " stack frames (start=" + start + ", levels=" + ( levels != null ? levels : "all" ) + ") from " + total + " filtered frames (" + allFrames.size() + " total)" );
+			LOGGER.info( "Returning " + page.size() + " stack frames (start=" + start + ", levels=" + ( levels != null ? levels : "all" ) + ") from " + total
+			    + " filtered frames (" + allFrames.size() + " total)" );
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error in handleStackTraceRequest: " + e.getMessage() );
