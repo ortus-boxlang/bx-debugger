@@ -15,6 +15,7 @@ import java.util.logging.Logger;
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.ContinueResponse;
+import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
 import org.eclipse.lsp4j.debug.EvaluateResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
@@ -915,6 +916,91 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return response;
 			}
 		} );
+	}
+
+	/**
+	 * Handle DAP disconnect request. Depending on the arguments, either terminate the debuggee,
+	 * detach and leave it running, or prepare for restart.
+	 */
+	@Override
+	public CompletableFuture<Void> disconnect( DisconnectArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			try {
+				boolean	terminate	= args != null && Boolean.TRUE.equals( args.getTerminateDebuggee() );
+				boolean	restart		= args != null && Boolean.TRUE.equals( args.getRestart() );
+
+				LOGGER.info( "Disconnect request received: terminateDebuggee=" + terminate + ", restart=" + restart );
+
+				if ( restart ) {
+					// For restart, signal termination of current session but let the client decide to relaunch.
+					// We perform cleanup and rely on a subsequent initialize/launch from client.
+					sendTerminatedEvent();
+					performSessionCleanup();
+					return null;
+				}
+
+				if ( terminate ) {
+					// Terminate the debuggee and send terminated/exited ordering via handleProgramExit
+					int exitCode = 0;
+					try {
+						if ( vm != null ) {
+							try {
+								vm.exit( 0 );
+							} catch ( Exception e ) {
+								LOGGER.warning( "Error requesting VM exit during disconnect: " + e.getMessage() );
+								try {
+									vm.dispose();
+								} catch ( Exception ignore ) {
+								}
+							}
+						}
+					} catch ( Exception e ) {
+						LOGGER.warning( "Error while terminating debuggee on disconnect: " + e.getMessage() );
+						exitCode = -1;
+					}
+
+					// Ensure DAP events and cleanup
+					handleProgramExit( exitCode );
+				} else {
+					// Detach scenario: leave program running, do not send exited; send terminated and cleanup
+					detachFromDebuggee();
+					sendTerminatedEvent();
+					performSessionCleanup();
+				}
+
+				return null;
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error handling disconnect request: " + e.getMessage() );
+				// Best-effort cleanup to avoid leaked state
+				try {
+					detachFromDebuggee();
+				} catch ( Exception ignore ) {
+				}
+				performSessionCleanup();
+				return null;
+			}
+		} );
+	}
+
+	/**
+	 * Detach from the running debuggee without terminating it.
+	 */
+	private void detachFromDebuggee() {
+		if ( vm != null ) {
+			try {
+				if ( vm.process() != null && vm.process().isAlive() ) {
+					// No direct JDI detach for LaunchingConnector VMs; best effort is to not kill the process
+					// and avoid vm.exit(). Dispose JDI connection so program continues.
+					vm.dispose();
+				} else {
+					vm.dispose();
+				}
+			} catch ( Exception e ) {
+				LOGGER.warning( "Error detaching from debuggee: " + e.getMessage() );
+			} finally {
+				vm = null;
+			}
+		}
 	}
 
 	/**

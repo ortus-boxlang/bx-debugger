@@ -9,4 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-* First iteration of this module
+Added
+- DAP disconnect request handling with terminate/detach/restart semantics
+- Basic evaluate support (REPL string literals; hover/watch gated on pause)
+
+Changed
+- Continue now resumes all threads and reports allThreadsContinued=true
+
+Fixed
+- Stabilized output-related tests with polling and added JDI launch retries

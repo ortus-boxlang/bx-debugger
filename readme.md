@@ -25,6 +25,8 @@ This module provides a Debug Adapter Protocol (DAP) compliant debugger for BoxLa
 - **Output Monitoring**: Capture and relay program output to the debug client
 - **Thread Management**: Support for multi-threaded debugging scenarios
 - **DAP Compliance**: Full compatibility with Debug Adapter Protocol specifications
+- **Evaluate (basic)**: Minimal support for string literals in REPL; hover/watch gated on pause
+- **Disconnect**: Handles terminate, detach, and restart semantics per DAP
 
 ## Testing
 
@@ -69,6 +71,31 @@ box task run taskFile=src/build/SetupTemplate
 ```
 
 The `SetupTemplate` task will ask you for your module name, id and description and configure the template for you! Enjoy!
+
+## DAP behavior highlights
+
+- Capabilities advertised:
+  - supportsTerminateRequest: true
+  - supportTerminateDebuggee: true
+  - supportsEvaluateForHovers: true
+- Continue resumes all threads and sets `allThreadsContinued = true`.
+
+### Evaluate
+
+- REPL: supports basic string literal echo, e.g., "hello" returns hello.
+- Hover/Watch: requires program to be paused; otherwise returns an error response.
+
+More BoxLang-aware evaluation and variable scopes will be added in future iterations.
+
+### Disconnect
+
+The debugger handles the DAP `disconnect` request with the following semantics:
+
+- terminateDebuggee = true: sends `terminated` then `exited`, and requests the VM to exit; cleans up session resources.
+- terminateDebuggee = false: detaches from the VM and sends `terminated` only; cleans up session resources.
+- restart = true: sends `terminated` and fully cleans up; the client may relaunch a fresh session.
+
+Event ordering and cleanup are covered by tests to ensure clients observe predictable behavior.
 
 ## Directory Structure
 
