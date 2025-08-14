@@ -53,6 +53,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private ExecutorService			outputMonitorExecutor;
 	private BreakpointManager		breakpointManager;
 	private SourceManager			sourceManager		= new SourceManager();
+	// Ensure we only start output monitoring once per session
+	private final java.util.concurrent.atomic.AtomicBoolean outputMonitoringStarted = new java.util.concurrent.atomic.AtomicBoolean( false );
 
 	// BoxLang debugging configuration
 	private String					debugMode			= "BoxLang"; // Default to BoxLang mode
@@ -153,6 +155,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				vm = launchingConnector.launch( arguments );
 				LOGGER.info( "JDI VM launched successfully" );
 
+				// Start output monitoring as early as possible to avoid missing early program output
+				startOutputMonitoring();
+
 				// Initialize or update breakpoint manager with the VM
 				if ( breakpointManager == null ) {
 					breakpointManager = new BreakpointManager( vm, client );
@@ -189,6 +194,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Start monitoring output from the debugged VM process
 	 */
 	private void startOutputMonitoring() {
+		// Idempotent start to prevent duplicate stream readers
+		if ( !outputMonitoringStarted.compareAndSet( false, true ) ) {
+			return;
+		}
+
 		if ( outputMonitorExecutor == null ) {
 			outputMonitorExecutor = Executors.newFixedThreadPool( 2 );
 		}
@@ -202,6 +212,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Monitor stderr
 			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
+		} else {
+			// If VM/process not ready yet, allow a later attempt via configurationDone
+			outputMonitoringStarted.set( false );
 		}
 	}
 
@@ -325,7 +338,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				LOGGER.info( "Stack trace request received for thread: " + args.getThreadId() + " in " + debugMode + " mode" );
 
-				return handleStackTraceRequest( args.getThreadId(), debugMode );
+				return handleStackTraceRequest( args.getThreadId(), debugMode, args.getStartFrame(), args.getLevels() );
 
 			} catch ( Exception e ) {
 				LOGGER.severe( "Error processing stack trace request: " + e.getMessage() );
@@ -399,14 +412,16 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	/**
-	 * Enhanced stack trace request handler that supports BoxLang and Java modes
+	 * Enhanced stack trace request handler that supports BoxLang and Java modes with pagination
 	 * 
-	 * @param threadId the thread ID to get stack frames for
-	 * @param mode     the debug mode ("BoxLang" or "Java")
+	 * @param threadId   the thread ID to get stack frames for
+	 * @param mode       the debug mode ("BoxLang" or "Java")
+	 * @param startFrame optional start index for frames (defaults to 0)
+	 * @param levels     optional number of frames to return (all if null)
 	 * 
-	 * @return StackTraceResponse with filtered frames based on mode
+	 * @return StackTraceResponse with filtered frames based on mode and paged
 	 */
-	private StackTraceResponse handleStackTraceRequest( int threadId, String mode ) {
+	private StackTraceResponse handleStackTraceRequest( int threadId, String mode, Integer startFrame, Integer levels ) {
 		StackTraceResponse response = new StackTraceResponse();
 
 		if ( vm == null || breakpointManager == null ) {
@@ -430,10 +445,27 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Filter frames based on debug mode
 			List<StackFrame> filteredFrames = filterStackFramesByMode( boxLangFrames, mode );
 
-			response.setStackFrames( filteredFrames.toArray( new StackFrame[ 0 ] ) );
-			response.setTotalFrames( filteredFrames.size() );
+			// Set total before pagination
+			int total = filteredFrames.size();
+			response.setTotalFrames( total );
 
-			LOGGER.info( "Returning " + filteredFrames.size() + " stack frames (filtered from " + allFrames.size() + " total frames)" );
+			// Apply pagination per DAP (startFrame default 0; levels optional)
+			int start = ( startFrame != null && startFrame > 0 ) ? startFrame : 0;
+			if ( start > total ) {
+				start = total; // empty result
+			}
+			int end;
+			if ( levels != null && levels > 0 ) {
+				end = Math.min( start + levels, total );
+			} else {
+				end = total;
+			}
+
+			List<StackFrame> page = ( start < end ) ? filteredFrames.subList( start, end ) : new ArrayList<>();
+
+			response.setStackFrames( page.toArray( new StackFrame[ 0 ] ) );
+
+			LOGGER.info( "Returning " + page.size() + " stack frames (start=" + start + ", levels=" + ( levels != null ? levels : "all" ) + ") from " + total + " filtered frames (" + allFrames.size() + " total)" );
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error in handleStackTraceRequest: " + e.getMessage() );
