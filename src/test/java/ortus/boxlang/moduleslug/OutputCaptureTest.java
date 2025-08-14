@@ -1,6 +1,5 @@
 package ortus.boxlang.moduleslug;
 
-import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -151,15 +150,19 @@ public class OutputCaptureTest {
 			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-			// Wait for output to be captured
-			Thread.sleep( 2000 );
+			// Wait up to 10 seconds for expected output to appear (integration can be slow)
+			String	expected	= "This is output from boxlang";
+			long	start		= System.currentTimeMillis();
+			while ( System.currentTimeMillis() - start < 10_000 ) {
+				if ( outputClient.getCapturedOutput().contains( expected ) ) {
+					break;
+				}
+				Thread.sleep( 200 );
+			}
 
-			// Verify that we captured some output
-			assertTrue( outputClient.hasReceivedOutput(),
-			    "Should have received output from the BoxLang program" );
-
-			assertThat( outputClient.getCapturedOutput() )
-			    .contains( "This is output from boxlang" );
+			// Verify that we captured the expected output
+			assertTrue( outputClient.getCapturedOutput().contains( expected ),
+			    "Expected output not captured within timeout" );
 
 			LOGGER.info( "Output capture test completed successfully" );
 
@@ -182,15 +185,6 @@ public class OutputCaptureTest {
 			CLIENT_LOGGER.info( "Received output: " + args.getOutput() );
 			capturedOutput += args.getOutput();
 			outputReceived.countDown();
-		}
-
-		public boolean hasReceivedOutput() {
-			try {
-				return outputReceived.await( 5, TimeUnit.SECONDS );
-			} catch ( InterruptedException e ) {
-				Thread.currentThread().interrupt();
-				return false;
-			}
 		}
 
 		public String getCapturedOutput() {

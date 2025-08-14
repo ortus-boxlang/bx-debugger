@@ -1,6 +1,5 @@
 package ortus.boxlang.moduleslug.boxlangIntegration;
 
-import static com.google.common.truth.Truth.assertThat;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -153,20 +152,22 @@ public class OutputTest {
 			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-			// Wait for output to be captured
-			Thread.sleep( 2000 );
+			// Wait up to 10 seconds for expected output to appear (integration can be slow)
+			String	expected	= "this is the outputx";
+			long	start		= System.currentTimeMillis();
+			while ( System.currentTimeMillis() - start < 10_000 ) {
+				if ( outputClient.getCapturedOutput().contains( expected ) ) {
+					break;
+				}
+				Thread.sleep( 200 );
+			}
 
 			// Verify that we captured the expected output
-			assertTrue( outputClient.hasReceivedOutput(),
-			    "Should have received output from the output-test.bxs program" );
+			assertTrue( outputClient.getCapturedOutput().contains( expected ),
+			    "Expected output not captured within timeout" );
 
-			// The output-test.bxs file should output the number 6 (result of 2 + 4)
 			String capturedOutput = outputClient.getCapturedOutput();
 			LOGGER.info( "Captured output: '" + capturedOutput + "'" );
-
-			// Look for the number 6 in the output, accounting for potential whitespace or newlines
-			assertThat( capturedOutput.trim() )
-			    .contains( "this is the outputx" );
 
 			LOGGER.info( "Output test integration completed successfully" );
 
@@ -191,14 +192,7 @@ public class OutputTest {
 			outputReceived.countDown();
 		}
 
-		public boolean hasReceivedOutput() {
-			try {
-				return outputReceived.await( 5, TimeUnit.SECONDS );
-			} catch ( InterruptedException e ) {
-				Thread.currentThread().interrupt();
-				return false;
-			}
-		}
+		// Intentionally no blocking wait helper; the test uses a polling loop for robustness
 
 		public String getCapturedOutput() {
 			return capturedOutput;

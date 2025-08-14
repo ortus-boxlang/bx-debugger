@@ -15,6 +15,8 @@ import java.util.logging.Logger;
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.ContinueResponse;
+import org.eclipse.lsp4j.debug.EvaluateArguments;
+import org.eclipse.lsp4j.debug.EvaluateResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.Scope;
@@ -151,9 +153,29 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner " + program );
 				// }
 
-				// Launch the VM
-				vm = launchingConnector.launch( arguments );
-				LOGGER.info( "JDI VM launched successfully" );
+				// Launch the VM with a couple of quick retries to avoid transient failures
+				final int	maxAttempts	= 3;
+				int			attempt		= 1;
+				while ( true ) {
+					try {
+						vm = launchingConnector.launch( arguments );
+						LOGGER.info( "JDI VM launched successfully" );
+						break;
+					} catch ( Exception launchEx ) {
+						if ( attempt >= maxAttempts ) {
+							LOGGER.severe( "Failed to launch program after " + attempt + " attempt(s): " + launchEx.getMessage() );
+							throw launchEx;
+						}
+						LOGGER.warning( "Launch attempt " + attempt + " failed: " + launchEx.getMessage() + "; retrying..." );
+						try {
+							Thread.sleep( 300L * attempt );
+						} catch ( InterruptedException ie ) {
+							Thread.currentThread().interrupt();
+							throw launchEx;
+						}
+						attempt++;
+					}
+				}
 
 				// Start output monitoring as early as possible to avoid missing early program output
 				startOutputMonitoring();
@@ -408,6 +430,70 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// In a real implementation, you would retrieve variables based on the reference
 			LOGGER.info( "Returning empty variables response for reference: " + args.getVariablesReference() );
 			return response;
+		} );
+	}
+
+	@Override
+	public CompletableFuture<EvaluateResponse> evaluate( EvaluateArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Evaluate request received. context=" + args.getContext() + ", expr=" + args.getExpression() );
+
+			EvaluateResponse	response	= new EvaluateResponse();
+			String				expr		= args.getExpression() != null ? args.getExpression().trim() : "";
+			String				context		= args.getContext() != null ? args.getContext().toLowerCase() : "repl";
+
+			try {
+				// Very small initial support:
+				// - string literals "..." -> return without quotes
+				// - otherwise, if not paused (no vm or no suspended threads), return error for hover/watch
+				// - in repl, if unsupported expression, return friendly error string
+
+				// Handle double-quoted string literal
+				if ( expr.startsWith( "\"" ) && expr.endsWith( "\"" ) && expr.length() >= 2 ) {
+					String value = expr.substring( 1, expr.length() - 1 );
+					response.setResult( value );
+					response.setVariablesReference( 0 );
+					return response;
+				}
+
+				boolean	isHoverOrWatch	= context.equals( "hover" ) || context.equals( "watch" );
+
+				// Determine if we are paused at a breakpoint (any suspended thread)
+				boolean	isPaused		= false;
+				try {
+					if ( vm != null ) {
+						isPaused = vm.allThreads().stream().anyMatch( t -> {
+							try {
+								return t.isSuspended();
+							} catch ( Exception e ) {
+								return false;
+							}
+						} );
+					}
+				} catch ( Exception e ) {
+					isPaused = false;
+				}
+
+				if ( isHoverOrWatch && !isPaused ) {
+					response.setResult( "Error: not paused; cannot evaluate in " + context + " context" );
+					response.setVariablesReference( 0 );
+					return response;
+				}
+
+				// Placeholder for future BoxLang expression evaluation in local context
+				// For now, return a simple error for non-literals
+				response.setResult( context.equals( "repl" )
+				    ? ( "Error: unsupported expression: " + expr )
+				    : ( "Error: unsupported expression in " + context + " context" ) );
+				response.setVariablesReference( 0 );
+				return response;
+
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error handling evaluate request: " + e.getMessage() );
+				response.setResult( "Error: " + e.getMessage() );
+				response.setVariablesReference( 0 );
+				return response;
+			}
 		} );
 	}
 
@@ -738,8 +824,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return new ContinueResponse();
 			}
 
-			// Resume execution for the specified thread
-			breakpointManager.continueExecution( args.getThreadId() );
+			// Resume execution for all threads to ensure the VM resumes from suspended state
+			breakpointManager.continueAllExecution();
 
 			LOGGER.info( "Continue request completed for thread: " + args.getThreadId() );
 
