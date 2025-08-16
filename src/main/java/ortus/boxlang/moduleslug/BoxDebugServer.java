@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -161,6 +162,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					try {
 						vm = launchingConnector.launch( arguments );
 						LOGGER.info( "JDI VM launched successfully" );
+						// Ensure the dedicated debug execution thread is created as early as possible
+						ensureDebugExecThread();
 						break;
 					} catch ( Exception launchEx ) {
 						if ( attempt >= maxAttempts ) {
@@ -382,27 +385,19 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				LOGGER.info( "Scopes request received for frame: " + args.getFrameId() );
 
-				ScopesResponse	response	= new ScopesResponse();
-				List<Scope>		scopes		= new ArrayList<>();
+				ScopesResponse				response			= new ScopesResponse();
+				Optional<BreakpointContext>	breakpointContext	= this.breakpointManager.getBreakpointContextbyStackFrame( args.getFrameId() );
 
-				// For now, we'll provide a basic server scope implementation
-				// In the future, this could be enhanced to extract actual BoxLang context
-				if ( args.getFrameId() >= 0 ) {
-					// Create server scope
-					Scope serverScope = new Scope();
-					serverScope.setName( "server" );
-					serverScope.setVariablesReference( 1000 + args.getFrameId() ); // Generate unique reference
-					serverScope.setExpensive( false );
-					serverScope.setPresentationHint( "data" );
+				List<Scope>					scopes				= this.breakpointManager.getSuspendedDebugThread()
+				    .thenCompose( ( debugThread ) -> {
+																	    return breakpointContext.get().getVisibleScopes( debugThread, args.getFrameId() );
+																    } )
+				    .exceptionally( e -> {
+					    LOGGER.severe( "Error getting suspended debug thread: " + e.getMessage() );
+					    return new ArrayList<>();
+				    } ).join();
 
-					scopes.add( serverScope );
-
-					LOGGER.info( "Created server scope with variables reference: " + serverScope.getVariablesReference() );
-				} else {
-					LOGGER.warning( "Invalid frame ID provided: " + args.getFrameId() );
-				}
-
-				response.setScopes( scopes.toArray( new Scope[ 0 ] ) );
+				response.setScopes( scopes.toArray( Scope[]::new ) );
 
 				LOGGER.info( "Returning " + scopes.size() + " scopes for frame " + args.getFrameId() );
 				return response;
@@ -520,7 +515,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		try {
 			// Get all stack frames from the breakpoint manager
-			List<StackFrame>		allFrames		= breakpointManager.getStackFrames( threadId );
+			List<StackFrame>		allFrames		= breakpointManager.getBreakpointContextByThread( threadId )
+			    .map( ctx -> ctx.getStackFrames() )
+			    .orElse( new ArrayList<>() );
 
 			// Convert to BoxLang stack frames and apply filtering based on mode
 			List<BoxLangStackFrame>	boxLangFrames	= new ArrayList<>();
@@ -550,7 +547,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			List<StackFrame> page = ( start < end ) ? filteredFrames.subList( start, end ) : new ArrayList<>();
 
-			response.setStackFrames( page.toArray( new StackFrame[ 0 ] ) );
+			response.setStackFrames( page.toArray( StackFrame[]::new ) );
 
 			LOGGER.info( "Returning " + page.size() + " stack frames (start=" + start + ", levels=" + ( levels != null ? levels : "all" ) + ") from " + total
 			    + " filtered frames (" + allFrames.size() + " total)" );
@@ -775,6 +772,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Start output monitoring using the VM's process
 			startOutputMonitoring();
 
+			// Create/invoke debug exec thread inside the VM
+			ensureDebugExecThread();
+
 			// Mark session as active and start process monitoring
 			sessionCleaned = false;
 			startProcessMonitoring();
@@ -803,7 +803,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 						vm.resume();
 					}
 				} catch ( Exception e ) {
-					LOGGER.warning( "Could not resume VM after configuration done: " + e.getMessage() );
+					java.util.logging.Logger.getLogger( BoxDebugServer.class.getName() )
+					    .warning( "Could not resume VM after configuration done: " + e.getMessage() );
 				}
 
 			} else {
@@ -813,6 +814,28 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			LOGGER.info( "Configuration done request completed successfully" );
 			return null;
 		} );
+	}
+
+	/**
+	 * Ensure the VM has a dedicated debug execution thread by invoking
+	 * DebugExecService.start() inside the target VM via JDI.
+	 */
+	private void ensureDebugExecThread() {
+		if ( vm == null )
+			return;
+		try {
+			// TODO move into breakpointmanager
+			// TODO Load this agent using a dynamic path
+			String								id			= String.valueOf( vm.process().pid() );
+			com.sun.tools.attach.VirtualMachine	attachVM	= com.sun.tools.attach.VirtualMachine.attach( id );
+			vm.resume();
+			attachVM.loadAgent( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\@MODULE_SLUG@-1.0.0-snapshot-agent.jar" );
+			attachVM.detach();
+			vm.suspend();
+
+		} catch ( Throwable e ) {
+			java.util.logging.Logger.getLogger( BoxDebugServer.class.getName() ).warning( "Failed to start debug exec thread: " + e.getMessage() );
+		}
 	}
 
 	@Override
@@ -873,6 +896,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 						dapThreads.add( dapThread );
 
 						LOGGER.fine( "Added thread: ID=" + dapThread.getId() + ", Name=" + dapThread.getName() );
+						// Emit names at INFO to help diagnose presence of our exec thread during tests
+						LOGGER.info( "Thread present: ID=" + dapThread.getId() + ", Name='" + dapThread.getName() + "'" );
 
 					} catch ( Exception e ) {
 						LOGGER.warning( "Error processing thread " + jdiThread.uniqueID() + ": " + e.getMessage() );

@@ -286,3 +286,22 @@ task bumpPatchVersion {
 		bumpVersion( false, false, true )
 	}
 }
+
+/**
+ * Build a Java Agent JAR with the required manifest entries.
+ * Output: build/libs/<project>-<version>-agent.jar
+ */
+task debugAgentJar(type: Jar) {
+	group = "build"
+	description = "Builds the Java agent JAR with Agent-Class manifest"
+	from sourceSets.main.output
+	archiveClassifier = 'agent'
+	manifest {
+		attributes(
+			'Manifest-Version': '1.0',
+			'Agent-Class' : 'ortus.boxlang.moduleslug.instrumentation.DebugAgent',
+			'Can-Redefine-Classes': 'true',
+			'Can-Retransform-Classes': 'true'
+		)
+	}
+}

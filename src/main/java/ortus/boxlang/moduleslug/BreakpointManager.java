@@ -1,12 +1,17 @@
 package ortus.boxlang.moduleslug;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.WeakHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Logger;
 
@@ -29,30 +34,41 @@ import com.sun.jdi.event.Event;
 import com.sun.jdi.event.EventIterator;
 import com.sun.jdi.event.EventQueue;
 import com.sun.jdi.event.EventSet;
+import com.sun.jdi.event.MethodEntryEvent;
 import com.sun.jdi.event.VMDeathEvent;
 import com.sun.jdi.event.VMDisconnectEvent;
 import com.sun.jdi.request.BreakpointRequest;
 import com.sun.jdi.request.ClassPrepareRequest;
+import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
+import com.sun.jdi.request.MethodEntryRequest;
+import com.sun.tools.attach.AgentInitializationException;
+import com.sun.tools.attach.AgentLoadException;
+import com.sun.tools.attach.AttachNotSupportedException;
 
 /**
  * Manages JDI breakpoints and handles breakpoint events
  */
 public class BreakpointManager {
 
-	private static final Logger							LOGGER						= Logger.getLogger( BreakpointManager.class.getName() );
+	private static final Logger												LOGGER						= Logger.getLogger( BreakpointManager.class.getName() );
 
-	private final VirtualMachine						vm;
-	private final IDebugProtocolClient					client;
-	private final List<BreakpointRequest>				activeBreakpoints			= new CopyOnWriteArrayList<>();
-	private final List<PendingBreakpointInfo>			pendingBreakpoints			= new CopyOnWriteArrayList<>();
-	private volatile boolean							eventProcessingActive		= false;
-	private Thread										eventProcessingThread;
+	private final VirtualMachine											vm;
+	private final IDebugProtocolClient										client;
+	private final List<BreakpointRequest>									activeBreakpoints			= new CopyOnWriteArrayList<>();
+	private final List<PendingBreakpointInfo>								pendingBreakpoints			= new CopyOnWriteArrayList<>();
+	private volatile boolean												eventProcessingActive		= false;
+	private Thread															eventProcessingThread;
 
 	// DAP-level breakpoint storage - organized by file path
-	private final Map<String, List<PendingBreakpoint>>	pendingBreakpointsByFile	= new ConcurrentHashMap<>();
-	private final Map<Integer, PendingBreakpoint>		pendingBreakpointsById		= new ConcurrentHashMap<>();
-	private int											breakpointIdCounter			= 1;
+	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile	= new ConcurrentHashMap<>();
+	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById		= new ConcurrentHashMap<>();
+	private int																breakpointIdCounter			= 1;
+
+	private final Map<Integer, BreakpointContext>							breakPointContexts			= new WeakHashMap<>();
+
+	private MethodEntryRequest												methodEntryRequest			= null;
+	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue		= new ConcurrentLinkedQueue<>();
 
 	/**
 	 * Represents a DAP breakpoint that has been requested but not yet verified
@@ -121,7 +137,69 @@ public class BreakpointManager {
 		// Only setup class prepare events if VM is available
 		if ( vm != null ) {
 			setupClassPrepareEvents();
+			setupDebugThread();
 		}
+	}
+
+	private void setupDebugThread() {
+		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
+		this.methodEntryRequest.addClassFilter( "ortus.boxlang.*" );
+		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+
+		String id = String.valueOf( vm.process().pid() );
+
+		try {
+			com.sun.tools.attach.VirtualMachine attachVM = com.sun.tools.attach.VirtualMachine.attach( id );
+			vm.resume();
+			attachVM.loadAgent( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\@MODULE_SLUG@-1.0.0-snapshot-agent.jar" );
+			attachVM.detach();
+		} catch ( AgentLoadException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch ( AgentInitializationException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch ( IOException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch ( AttachNotSupportedException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+		vm.suspend();
+	}
+
+	public CompletableFuture<ThreadReference> getSuspendedDebugThread() {
+		var debug = getDebugThread();
+		if ( !methodEntryRequest.isEnabled() && debug.isSuspended() ) {
+			debug.resume();
+		}
+
+		methodEntryRequest.enable();
+
+		var f = new CompletableFuture<ThreadReference>();
+
+		debugThreadAccessQueue.add( f );
+		return f;
+	}
+
+	public Optional<BreakpointContext> getBreakpointContext( int breakpointId ) {
+		return Optional.ofNullable( breakPointContexts.get( breakpointId ) );
+	}
+
+	public Optional<BreakpointContext> getBreakpointContextByThread( int threadId ) {
+		return breakPointContexts.values()
+		    .stream()
+		    .filter( ctx -> ctx.getThreadReference().uniqueID() == threadId )
+		    .findFirst();
+	}
+
+	public Optional<BreakpointContext> getBreakpointContextbyStackFrame( int stackframeId ) {
+		return breakPointContexts.values()
+		    .stream()
+		    .filter( ctx -> ctx.hasStackFrameId( stackframeId ) )
+		    .findFirst();
 	}
 
 	/**
@@ -196,7 +274,7 @@ public class BreakpointManager {
 					Location	location	= locations.get( 0 );
 					String		sourceName	= getSourceName( location );
 
-					LOGGER.info( "Found location at " + sourceName + ":" + lineNumber + " in class " + refType.name() );
+					LOGGER.fine( "Found location at " + sourceName + ":" + lineNumber + " in class " + refType.name() );
 
 					// More flexible matching: check if the class name matches what we expect
 					if ( sourceName != null && sourceName.equalsIgnoreCase( filePath ) ) {
@@ -209,7 +287,7 @@ public class BreakpointManager {
 			}
 		}
 
-		LOGGER.info( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
+		LOGGER.fine( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
 
 		return false;
 	}
@@ -303,6 +381,8 @@ public class BreakpointManager {
 						handleBreakpointEvent( ( BreakpointEvent ) event );
 					} else if ( event instanceof ClassPrepareEvent ) {
 						handleClassPrepareEvent( ( ClassPrepareEvent ) event );
+					} else if ( event instanceof MethodEntryEvent ) {
+						handleMethodEntryEvent( ( MethodEntryEvent ) event );
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
 						eventProcessingActive = false;
@@ -316,7 +396,7 @@ public class BreakpointManager {
 				EventIterator	iter			= eventSet.eventIterator();
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
-					if ( evt instanceof BreakpointEvent ) {
+					if ( evt instanceof BreakpointEvent || evt instanceof MethodEntryEvent ) {
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					}
@@ -336,6 +416,33 @@ public class BreakpointManager {
 				LOGGER.severe( "Error processing events: " + e.getMessage() );
 			}
 		}
+	}
+
+	private ThreadReference getDebugThread() {
+		for ( ThreadReference ref : vm.allThreads() ) {
+			if ( ref.name().equals( "bxDebugAgent" ) ) {
+				return ref;
+			}
+		}
+
+		return null;
+	}
+
+	private void handleMethodEntryEvent( MethodEntryEvent event ) {
+		if ( !event.location().declaringType().name().equals( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" ) ) {
+			vm.resume();
+		}
+
+		CompletableFuture<ThreadReference> f = debugThreadAccessQueue.poll();
+
+		if ( f == null ) {
+			LOGGER.warning( "No future available for method entry event" );
+			return;
+		}
+
+		methodEntryRequest.setEnabled( debugThreadAccessQueue.size() > 0 );
+
+		f.complete( getDebugThread() );
 	}
 
 	/**
@@ -360,6 +467,11 @@ public class BreakpointManager {
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
 			}
+
+			breakPointContexts.put(
+			    Integer.valueOf( ( int ) event.request().getProperty( "breakPointId" ) ),
+			    new BreakpointContext( ( int ) event.request().getProperty( "breakPointId" ), event.thread() )
+			);
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );
@@ -386,7 +498,7 @@ public class BreakpointManager {
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
 			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber ) ) {
 				toRemove.add( pending );
-				LOGGER.info( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
+				LOGGER.fine( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
 			}
 		}
 

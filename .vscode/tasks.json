@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build debugAgentJar",
+			"type": "shell",
+			"command": "./gradlew.bat",
+			"args": [
+				"debugAgentJar"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gradle"
+			],
+			"group": "build"
+		}
+	]
+}
