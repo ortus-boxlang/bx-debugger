@@ -10,7 +10,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
-import org.eclipse.lsp4j.debug.Scope;
 import org.eclipse.lsp4j.debug.Source;
 
 import com.sun.jdi.AbsentInformationException;
@@ -19,7 +18,6 @@ import com.sun.jdi.IncompatibleThreadStateException;
 import com.sun.jdi.Location;
 import com.sun.jdi.ObjectReference;
 import com.sun.jdi.StackFrame;
-import com.sun.jdi.StringReference;
 import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
 
@@ -68,13 +66,17 @@ public class BreakpointContext {
 		return context;
 	}
 
+	public void resume() {
+		threadReference.resume();
+	}
+
 	public List<org.eclipse.lsp4j.debug.StackFrame> getStackFrames() {
 		return stackFrames.stream()
 		    .map( FrameTuple::dapFrame )
 		    .collect( Collectors.toList() );
 	}
 
-	public CompletableFuture<List<Scope>> getVisibleScopes( ThreadReference invokeThread, int frameId ) {
+	public CompletableFuture<List<Value>> getVisibleScopes( ThreadReference invokeThread, int frameId ) {
 		var frameTuple = stackFrames.stream()
 		    .filter( frame -> frame.id == frameId )
 		    .findFirst();
@@ -86,10 +88,10 @@ public class BreakpointContext {
 		var context = findNearestContextByFrameId( frameId );
 
 		return context.map( ctx -> invokeGetVisibleScopes( invokeThread, ctx ) )
-		    .orElse( CompletableFuture.completedFuture( new ArrayList<Scope>() ) );
+		    .orElse( CompletableFuture.completedFuture( new ArrayList<Value>() ) );
 	}
 
-	private CompletableFuture<List<Scope>> invokeGetVisibleScopes( ThreadReference invokeThread, ObjectReference boxContext ) {
+	private CompletableFuture<List<Value>> invokeGetVisibleScopes( ThreadReference invokeThread, ObjectReference boxContext ) {
 		return Util.invokeAsync( invokeThread, boxContext, "getVisibleScopes", "()Lortus/boxlang/runtime/types/IStruct;", new ArrayList<Value>() )
 		    .handle( ( result, error ) -> {
 			    if ( error != null ) {
@@ -121,51 +123,11 @@ public class BreakpointContext {
 		    .thenApply( arrayOfScopes -> {
 
 			    if ( arrayOfScopes instanceof ArrayReference ref ) {
-				    return ref.getValues().stream()
-				        .map( val -> convertScopeToDAPScope( invokeThread, val ) )
-				        .collect( Collectors.toList() );
+				    return ref.getValues();
 			    }
 
 			    return new ArrayList<>();
 		    } );
-	}
-
-	private Scope convertScopeToDAPScope( ThreadReference invokeThread, Value scopeValue ) {
-		Scope	scope	= new Scope();
-
-		String	name	= Util.invokeAsync(
-		    invokeThread,
-		    ( ObjectReference ) scopeValue,
-		    "getName",
-		    "()Lortus/boxlang/runtime/scopes/Key;",
-		    new ArrayList<Value>()
-		)
-		    .thenCompose( key -> Util.invokeAsync(
-		        invokeThread,
-		        ( ObjectReference ) key,
-		        "getName",
-		        "()Ljava/lang/String;",
-		        new ArrayList<Value>()
-		    ) )
-		    .thenApply( nameValue -> {
-			    if ( nameValue instanceof StringReference ref ) {
-				    return ref.value();
-			    }
-
-			    return "Unknown Scope";
-		    } )
-		    .exceptionally( e -> {
-			    LOGGER.severe( "Error getting scope name: " + e.getMessage() );
-			    return "Unknown Scope";
-		    } )
-		    .join();
-
-		scope.setName( name );
-		scope.setVariablesReference( variableId++ );
-
-		this.variables.put( scope.getVariablesReference(), scopeValue );
-
-		return scope;
 	}
 
 	private Optional<ObjectReference> findNearestContextByFrameId( int frameId ) {

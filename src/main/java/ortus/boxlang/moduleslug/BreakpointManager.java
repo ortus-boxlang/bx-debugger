@@ -173,7 +173,9 @@ public class BreakpointManager {
 	public CompletableFuture<ThreadReference> getSuspendedDebugThread() {
 		var debug = getDebugThread();
 		if ( !methodEntryRequest.isEnabled() && debug.isSuspended() ) {
-			debug.resume();
+			while ( debug.isSuspended() ) {
+				debug.resume();
+			}
 		}
 
 		methodEntryRequest.enable();
@@ -456,6 +458,12 @@ public class BreakpointManager {
 
 			LOGGER.info( "Breakpoint hit at " + sourceName + ":" + lineNumber );
 
+			// this MUST happen before we respond to the client
+			breakPointContexts.put(
+			    Integer.valueOf( ( int ) event.request().getProperty( "breakPointId" ) ),
+			    new BreakpointContext( ( int ) event.request().getProperty( "breakPointId" ), event.thread() )
+			);
+
 			// Send stopped event to the debug client
 			if ( client != null ) {
 				StoppedEventArguments stoppedArgs = new StoppedEventArguments();
@@ -467,11 +475,6 @@ public class BreakpointManager {
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
 			}
-
-			breakPointContexts.put(
-			    Integer.valueOf( ( int ) event.request().getProperty( "breakPointId" ) ),
-			    new BreakpointContext( ( int ) event.request().getProperty( "breakPointId" ), event.thread() )
-			);
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );

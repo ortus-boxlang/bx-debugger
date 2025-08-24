@@ -12,6 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
@@ -40,6 +41,8 @@ import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
 import com.sun.jdi.Bootstrap;
+import com.sun.jdi.ThreadReference;
+import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
 import com.sun.jdi.connect.Connector;
 import com.sun.jdi.connect.LaunchingConnector;
@@ -67,6 +70,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private volatile boolean								sessionCleaned			= false;
 	private volatile boolean								terminatedEventSent		= false;
 	private final Object									exitLock				= new Object();
+	private VariableManager									variableManager			= new VariableManager();
 
 	/**
 	 * Connect to the language client
@@ -385,13 +389,22 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				LOGGER.info( "Scopes request received for frame: " + args.getFrameId() );
 
-				ScopesResponse				response			= new ScopesResponse();
-				Optional<BreakpointContext>	breakpointContext	= this.breakpointManager.getBreakpointContextbyStackFrame( args.getFrameId() );
+				ScopesResponse						response			= new ScopesResponse();
+				Optional<BreakpointContext>			breakpointContext	= this.breakpointManager.getBreakpointContextbyStackFrame( args.getFrameId() );
 
-				List<Scope>					scopes				= this.breakpointManager.getSuspendedDebugThread()
-				    .thenCompose( ( debugThread ) -> {
-																	    return breakpointContext.get().getVisibleScopes( debugThread, args.getFrameId() );
-																    } )
+				CompletableFuture<ThreadReference>	debugThreadFuture	= this.breakpointManager.getSuspendedDebugThread();
+				CompletableFuture<List<Value>>		scopeValueFuture	= debugThreadFuture.thenCompose( debugThread -> {
+																			return breakpointContext
+																			    .map( context -> context.getVisibleScopes( debugThread, args.getFrameId() ) )
+																			    .orElseGet( () -> CompletableFuture.completedFuture( new ArrayList<>() ) );
+																		} );
+
+				List<Scope>							scopes				= debugThreadFuture.thenCombine( scopeValueFuture, ( debugThread, scopeList ) -> {
+																			return scopeList.stream()
+																			    .map(
+																			        scope -> this.variableManager.convertScopeToDAPScope( debugThread, scope ) )
+																			    .collect( Collectors.toList() );
+																		} )
 				    .exceptionally( e -> {
 					    LOGGER.severe( "Error getting suspended debug thread: " + e.getMessage() );
 					    return new ArrayList<>();
@@ -849,7 +862,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			// Resume execution for all threads to ensure the VM resumes from suspended state
-			breakpointManager.continueAllExecution();
+			breakpointManager.getBreakpointContextByThread( args.getThreadId() ).ifPresent( context -> {
+				context.resume();
+			} );
 
 			LOGGER.info( "Continue request completed for thread: " + args.getThreadId() );
 

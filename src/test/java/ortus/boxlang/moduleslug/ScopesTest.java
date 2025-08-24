@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
+import org.eclipse.lsp4j.debug.ContinueArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.Scope;
 import org.eclipse.lsp4j.debug.ScopesArguments;
@@ -95,12 +96,12 @@ public class ScopesTest {
 				breakpointArgs.setSource( source );
 
 				SourceBreakpoint functionBreakpoint = new SourceBreakpoint();
-				functionBreakpoint.setLine( 2 );
+				functionBreakpoint.setLine( 3 );
 				functionBreakpoint.setCondition( null ); // No condition
 
 				SourceBreakpoint scriptBreakpoint = new SourceBreakpoint();
-				functionBreakpoint.setLine( 5 );
-				functionBreakpoint.setCondition( null ); // No condition
+				scriptBreakpoint.setLine( 6 );
+				scriptBreakpoint.setCondition( null ); // No condition
 
 				breakpointArgs.setBreakpoints( new SourceBreakpoint[] { functionBreakpoint, scriptBreakpoint } );
 
@@ -113,23 +114,23 @@ public class ScopesTest {
 
 				// TODO figure out why the function breakpoint returns line 0
 				List.of( breakpointResult.getBreakpoints() ).stream()
-				    .filter( b -> b.getLine() == 0 )
+				    .filter( b -> b.getLine() == 3 )
 				    .findFirst()
 				    .ifPresentOrElse( b -> {
-					    assertThat( b.getLine() ).isEqualTo( 0 );
+					    assertThat( b.getLine() ).isEqualTo( 3 );
 					    assertThat( b.isVerified() ).isFalse();
 				    }, () -> {
-					    fail( "Function breakpoint for line 2 not found" );
+					    fail( "Function breakpoint for line 3 not found" );
 				    } );
 
 				List.of( breakpointResult.getBreakpoints() ).stream()
-				    .filter( b -> b.getLine() == 5 )
+				    .filter( b -> b.getLine() == 6 )
 				    .findFirst()
 				    .ifPresentOrElse( b -> {
-					    assertThat( b.getLine() ).isEqualTo( 5 );
+					    assertThat( b.getLine() ).isEqualTo( 6 );
 					    assertThat( b.isVerified() ).isFalse();
 				    }, () -> {
-					    fail( "Function breakpoint for line 5 not found" );
+					    fail( "Function breakpoint for line 6 not found" );
 				    } );
 
 				// LAUNCH
@@ -162,7 +163,7 @@ public class ScopesTest {
 				StackTraceResponse						stackTraceResult	= stackTraceResponse.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
-				assertThat( stackTraceResult.getStackFrames()[ 0 ].getLine() ).isEqualTo( 5 );                                                                                                                // response
+				assertThat( stackTraceResult.getStackFrames()[ 0 ].getLine() ).isEqualTo( 6 );                                                                                                                // response
 
 				// SCOPES
 				ScopesArguments scopesArguments = new ScopesArguments();
@@ -177,13 +178,42 @@ public class ScopesTest {
 				Scope requestScope = DebugServerTestUtils.findScope( scopesResult, "request" );
 				assertThat( requestScope ).isNotNull();
 
-				// TODO get variables of variables scope in script
-				// TODO send continue
-				// TODO hit next breakpoint
-				// TODO get stack frame
-				// TODO get scopes
+				// CONTINUE
+				ContinueArguments continueArgs = new ContinueArguments();
+				continueArgs.setThreadId( stopped.get().getThreadId() );
+				server.continue_( continueArgs );
+
+				// WAIT FOR BREAKPOINT
+				CompletableFuture<StoppedEventArguments>	stopped2		= client.waitForStoppedEvent();
+				StoppedEventArguments						stoppedArgs2	= stopped2.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stopped event
+
+				// GET STACK TRACE
+				StackTraceArguments							stackTraceArgs2	= new StackTraceArguments();
+				stackTraceArgs2.setThreadId( stoppedArgs2.getThreadId() );
+				CompletableFuture<StackTraceResponse>	stackTraceResponse2	= server.stackTrace( stackTraceArgs2 );
+				StackTraceResponse						stackTraceResult2	= stackTraceResponse2.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
+				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
+				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
+				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getLine() ).isEqualTo( 3 );
+
+				// SCOPES
+				ScopesArguments scopesArguments2 = new ScopesArguments();
+				scopesArguments2.setFrameId( stackTraceResult2.getStackFrames()[ 0 ].getId() );
+				CompletableFuture<ScopesResponse>	scopesResponse2	= server.scopes( scopesArguments2 );
+				ScopesResponse						scopesResult2	= scopesResponse2.get( TIMEOUT, TimeUnit.SECONDS );
+
+				Scope								variablesScope2	= DebugServerTestUtils.findScope( scopesResult2, "variables" );
+				assertThat( variablesScope2 ).isNotNull();
+				Scope serverScope2 = DebugServerTestUtils.findScope( scopesResult2, "server" );
+				assertThat( serverScope2 ).isNotNull();
+				Scope requestScope2 = DebugServerTestUtils.findScope( scopesResult2, "request" );
+				assertThat( requestScope2 ).isNotNull();
+				Scope localScope2 = DebugServerTestUtils.findScope( scopesResult2, "local" );
+				assertThat( localScope2 ).isNotNull();
+				Scope argumentsScope2 = DebugServerTestUtils.findScope( scopesResult2, "arguments" );
+				assertThat( argumentsScope2 ).isNotNull();
+
 				// TODO get variables of variables scope in function
-				// TODO continue
 				// TODO send eval to change variable
 				// TODO get changed output of script
 
