@@ -28,10 +28,10 @@ import org.junit.jupiter.api.Timeout;
  */
 public class ScopesRequestHandlingTest {
 
-	private static final int		TEST_PORT			= 9999;
+	private static final int	TEST_PORT	= 9999;
 
-	private Thread					debuggerThread;
-	private CountDownLatch			serverStartupLatch;
+	private Thread				debuggerThread;
+	private CountDownLatch		serverStartupLatch;
 
 	/**
 	 * Test debug client for receiving events and responses
@@ -42,17 +42,17 @@ public class ScopesRequestHandlingTest {
 
 	@BeforeEach
 	void setUp() throws Exception {
-		serverStartupLatch = new CountDownLatch( 1 );
+		serverStartupLatch	= new CountDownLatch( 1 );
 
 		// Start the debug server in a separate thread
-		debuggerThread = new Thread( () -> {
-			try {
-				serverStartupLatch.countDown();
-				BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
-			} catch ( Exception e ) {
-				e.printStackTrace();
-			}
-		} );
+		debuggerThread		= new Thread( () -> {
+								try {
+									serverStartupLatch.countDown();
+									BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
+								} catch ( Exception e ) {
+									e.printStackTrace();
+								}
+							} );
 
 		debuggerThread.setDaemon( true );
 		debuggerThread.start();
@@ -79,15 +79,15 @@ public class ScopesRequestHandlingTest {
 			assertTrue( clientSocket.isConnected(), "Should be connected to debug server" );
 
 			// Create the DAP client
-			TestDebugClient							testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>			launcher	= DSPLauncher.createClientLauncher(
+			TestDebugClient					testClient	= new TestDebugClient();
+			Launcher<IDebugProtocolServer>	launcher	= DSPLauncher.createClientLauncher(
 			    testClient,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);
 
 			// Get the remote proxy (debug server)
-			IDebugProtocolServer server = launcher.getRemoteProxy();
+			IDebugProtocolServer			server		= launcher.getRemoteProxy();
 
 			// Start listening for messages
 			launcher.startListening();
@@ -138,15 +138,15 @@ public class ScopesRequestHandlingTest {
 			assertTrue( clientSocket.isConnected(), "Should be connected to debug server" );
 
 			// Create the DAP client
-			TestDebugClient							testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>			launcher	= DSPLauncher.createClientLauncher(
+			TestDebugClient					testClient	= new TestDebugClient();
+			Launcher<IDebugProtocolServer>	launcher	= DSPLauncher.createClientLauncher(
 			    testClient,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);
 
 			// Get the remote proxy (debug server)
-			IDebugProtocolServer server = launcher.getRemoteProxy();
+			IDebugProtocolServer			server		= launcher.getRemoteProxy();
 
 			// Start listening for messages
 			launcher.startListening();
@@ -185,15 +185,15 @@ public class ScopesRequestHandlingTest {
 			assertTrue( clientSocket.isConnected(), "Should be connected to debug server" );
 
 			// Create the DAP client
-			TestDebugClient							testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>			launcher	= DSPLauncher.createClientLauncher(
+			TestDebugClient					testClient	= new TestDebugClient();
+			Launcher<IDebugProtocolServer>	launcher	= DSPLauncher.createClientLauncher(
 			    testClient,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);
 
 			// Get the remote proxy (debug server)
-			IDebugProtocolServer server = launcher.getRemoteProxy();
+			IDebugProtocolServer			server		= launcher.getRemoteProxy();
 
 			// Start listening for messages
 			launcher.startListening();
