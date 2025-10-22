@@ -87,10 +87,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		Capabilities capabilities = new Capabilities();
 		capabilities.setSupportsConfigurationDoneRequest( true );
 		capabilities.setSupportsTerminateRequest( true );
-		capabilities.setSupportsFunctionBreakpoints( false );
 		capabilities.setSupportsConditionalBreakpoints( true );
-		capabilities.setSupportsHitConditionalBreakpoints( false );
 		capabilities.setSupportsEvaluateForHovers( true );
+		capabilities.setSupportTerminateDebuggee( true );
+		capabilities.setSupportsTerminateRequest( true );
+
+		capabilities.setSupportsFunctionBreakpoints( false );
+		capabilities.setSupportsHitConditionalBreakpoints( false );
 		capabilities.setSupportsStepBack( false );
 		capabilities.setSupportsSetVariable( false );
 		capabilities.setSupportsRestartFrame( false );
@@ -102,13 +105,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsExceptionOptions( false );
 		capabilities.setSupportsValueFormattingOptions( false );
 		capabilities.setSupportsExceptionInfoRequest( false );
-		capabilities.setSupportTerminateDebuggee( true );
 		capabilities.setSupportsDelayedStackTraceLoading( false );
 		capabilities.setSupportsLoadedSourcesRequest( false );
 		capabilities.setSupportsLogPoints( false );
 		capabilities.setSupportsTerminateThreadsRequest( false );
 		capabilities.setSupportsSetExpression( false );
-		capabilities.setSupportsTerminateRequest( true );
 		capabilities.setSupportsDataBreakpoints( false );
 		capabilities.setSupportsReadMemoryRequest( false );
 		capabilities.setSupportsDisassembleRequest( false );
@@ -116,6 +117,19 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsBreakpointLocationsRequest( false );
 
 		LOGGER.info( "Sending capabilities to client" );
+
+		CompletableFuture.supplyAsync( () -> {
+			try {
+				Thread.sleep( 1000 );
+				client.initialized();
+			} catch ( InterruptedException e ) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
+			return null;
+		} );
+
 		return CompletableFuture.completedFuture( capabilities );
 	}
 
@@ -209,7 +223,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
 
-				client.initialized();
+				// client.initialized();
 
 				return null;
 			} catch ( Exception e ) {
@@ -651,6 +665,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Perform cleanup
 			performSessionCleanup();
+
+			// Exit the current process after handling the debuggee's exit
+			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
+			System.exit( 0 );
 		}
 	}
 
@@ -672,6 +690,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Perform cleanup
 			performSessionCleanup();
+
+			// Exit the current process after handling the debuggee's exit
+			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
+			System.exit( 0 );
 		}
 	}
 
