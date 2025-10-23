@@ -97,6 +97,64 @@ The debugger handles the DAP `disconnect` request with the following semantics:
 
 Event ordering and cleanup are covered by tests to ensure clients observe predictable behavior.
 
+## VS Code Launch Configuration Example
+
+To debug a BoxLang script or application in VS Code, add a launch configuration to your `.vscode/launch.json`. The `program` attribute points to the BoxLang entry script you want to execute (relative to the workspace or an absolute path). The debugger will launch BoxRunner with that script.
+
+Optional attributes supported by this adapter:
+
+- `program` (string, required): Path to the `.bxs` (or BoxLang) file to run.
+- `bx-home` (string, optional): Path to a BoxLang home directory; if provided it is passed as `--bx-home` to BoxRunner.
+- `debugMode` (string, optional): Either `BoxLang` (default, filters stack frames to BoxLang sources) or `Java` (includes all Java frames).
+- `stopOnEntry` (boolean, optional - planned): If implemented, would keep the VM suspended until `configurationDone`.
+
+Minimal example:
+
+```jsonc
+// .vscode/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BoxLang: Run Script",
+      "type": "boxlang",            // Your debug adapter's type id
+      "request": "launch",
+      "program": "src/test/resources/main.bxs"
+    }
+  ]
+}
+```
+
+Extended example with optional fields:
+
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BoxLang: Run With Home (Java Mode)",
+      "type": "boxlang",
+      "request": "launch",
+      "program": "examples/app.bxs",         // Required
+      "bx-home": "C:/boxlang/home",          // Optional BoxLang home path
+      "debugMode": "Java",                   // Show Java + BoxLang frames
+      "stopOnEntry": true                     // (Planned) pause before executing user code
+    }
+  ]
+}
+```
+
+Notes:
+
+- Ensure the path in `program` exists; missing files will cause launch failure.
+- Breakpoints set before launch are stored and verified once the VM starts; they become active after `configurationDone`.
+- Switching `debugMode` to `Java` can help when stepping into Java interop code.
+- If `bx-home` is omitted, BoxRunner will use default resolution logic.
+- `stopOnEntry` will have no effect until implemented in the adapter.
+
+If you see no breakpoints being hit early, consider adding (future) `stopOnEntry` or placing a breakpoint near the top of your script.
+
+
 ## Directory Structure
 
 Here is a brief overview of the directory structure:

@@ -229,7 +229,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			} catch ( Exception e ) {
 				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
 				e.printStackTrace();
-				throw new RuntimeException( "Launch failed", e );
+				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
 			}
 		} );
 	}
@@ -306,18 +306,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
 			String line;
 			while ( ( line = reader.readLine() ) != null ) {
-				if ( client != null ) {
-					OutputEventArguments outputEvent = new OutputEventArguments();
-					outputEvent.setOutput( line + System.lineSeparator() );
-					outputEvent.setCategory( category );
-
-					LOGGER.info( "Sending output event: " + line );
-					client.output( outputEvent );
-				}
+				sendOutput( line, category );
 			}
 		} catch ( IOException e ) {
 			LOGGER.warning( "Error reading from " + category + " stream: " + e.getMessage() );
 		}
+	}
+
+	private void sendOutput( String message, String category ) {
+		if ( client == null ) {
+			return;
+		}
+
+		OutputEventArguments outputEvent = new OutputEventArguments();
+		outputEvent.setOutput( message + System.lineSeparator() );
+		outputEvent.setCategory( category );
+
+		LOGGER.info( "Sending output event: " + message );
+		client.output( outputEvent );
 	}
 
 	/**
