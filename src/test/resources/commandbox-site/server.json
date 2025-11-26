@@ -1,0 +1,16 @@
+{
+    "app":{
+        "cfengine":"boxlang@be"
+    },
+    "jvm":{
+        "javaVersion":"openjdk21",
+        "args":"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=10110"
+    },
+    "web":{
+        "bindings":{
+            "HTTP":{
+                "listen":"10111"
+            }
+        }
+    }
+}

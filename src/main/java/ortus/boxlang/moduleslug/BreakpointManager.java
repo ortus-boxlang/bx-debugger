@@ -1,6 +1,5 @@
 package ortus.boxlang.moduleslug;
 
-import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -42,9 +41,6 @@ import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.MethodEntryRequest;
-import com.sun.tools.attach.AgentInitializationException;
-import com.sun.tools.attach.AgentLoadException;
-import com.sun.tools.attach.AttachNotSupportedException;
 
 /**
  * Manages JDI breakpoints and handles breakpoint events
@@ -137,37 +133,8 @@ public class BreakpointManager {
 		// Only setup class prepare events if VM is available
 		if ( vm != null ) {
 			setupClassPrepareEvents();
-			setupDebugThread();
+			setupMethodEntryRequest();
 		}
-	}
-
-	private void setupDebugThread() {
-		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequest.addClassFilter( "ortus.boxlang.*" );
-		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-
-		String id = String.valueOf( vm.process().pid() );
-
-		try {
-			com.sun.tools.attach.VirtualMachine attachVM = com.sun.tools.attach.VirtualMachine.attach( id );
-			vm.resume();
-			attachVM.loadAgent( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\@MODULE_SLUG@-1.0.0-snapshot-agent.jar" );
-			attachVM.detach();
-		} catch ( AgentLoadException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch ( AgentInitializationException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch ( IOException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch ( AttachNotSupportedException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-
-		vm.suspend();
 	}
 
 	public CompletableFuture<ThreadReference> getSuspendedDebugThread() {
@@ -827,5 +794,11 @@ public class BreakpointManager {
 			LOGGER.severe( "Error resuming all threads: " + e.getMessage() );
 			e.printStackTrace();
 		}
+	}
+
+	private void setupMethodEntryRequest() {
+		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
+		this.methodEntryRequest.addClassFilter( "ortus.boxlang.*" );
+		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 	}
 }

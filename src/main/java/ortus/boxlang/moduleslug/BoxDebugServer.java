@@ -40,12 +40,11 @@ import org.eclipse.lsp4j.debug.VariablesResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
-import com.sun.jdi.Bootstrap;
 import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
-import com.sun.jdi.connect.Connector;
-import com.sun.jdi.connect.LaunchingConnector;
+
+import ortus.boxlang.moduleslug.vm.IVMConnection;
 
 /**
  * BoxLang Debug Server implementation of the Debug Adapter Protocol
@@ -71,6 +70,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private volatile boolean								terminatedEventSent		= false;
 	private final Object									exitLock				= new Object();
 	private VariableManager									variableManager			= new VariableManager();
+
+	private IVMConnection									vmConnection			= null;
 
 	/**
 	 * Connect to the language client
@@ -134,6 +135,48 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	@Override
+	public CompletableFuture<Void> attach( Map<String, Object> args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			if ( vm != null ) {
+				LOGGER.warning( "Attach requested but VM already present" );
+				return null;
+			}
+			String serverName = ( String ) args.getOrDefault( "serverName", "" );
+
+			if ( serverName.isEmpty() ) {
+				LOGGER.warning( "Attach requested but serverName is empty" );
+				return null;
+			}
+
+			try {
+				this.vmConnection	= new ortus.boxlang.moduleslug.vm.CommandBoxConnection( serverName );
+				this.vm				= vmConnection.getVirtualMachine();
+			} catch ( Exception e ) {
+				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
+				e.printStackTrace();
+				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
+
+				return null;
+			}
+
+			// Initialize breakpoint manager
+			if ( breakpointManager == null ) {
+				breakpointManager = new BreakpointManager( vm, client );
+			} else {
+				// If you want to migrate pending breakpoints (mirrors launch logic)
+				BreakpointManager old = breakpointManager;
+				breakpointManager = new BreakpointManager( vm, client );
+				old.getAllPendingBreakpoints().forEach( ( path, list ) -> {
+					list.forEach( p -> breakpointManager.storePendingBreakpoint( p.getSource(), p.getSourceBreakpoint(), p.getBreakpoint() ) );
+				} );
+			}
+
+			startOutputMonitoring(); // may be a no-op if remote
+			return null;
+		} );
+	}
+
+	@Override
 	public CompletableFuture<Void> launch( Map<String, Object> args ) {
 		return CompletableFuture.supplyAsync( () -> {
 			try {
@@ -147,57 +190,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				}
 				LOGGER.info( "Debug mode set to: " + debugMode );
 
-				// Use JDI to launch the program with debugging enabled
-				LaunchingConnector				launchingConnector	= Bootstrap.virtualMachineManager().defaultConnector();
-				Map<String, Connector.Argument>	arguments			= launchingConnector.defaultArguments();
-
-				// Set up the command line arguments
-				String							classpath			= System.getProperty( "java.class.path" );
-				arguments.get( "options" ).setValue( "-cp \"" + classpath + "\"" );
-
-				StringBuilder command = new StringBuilder();
-				command.append( "ortus.boxlang.runtime.BoxRunner " + program );
-
-				String bxHome = ( String ) args.get( "bx-home" );
-				if ( bxHome != null ) {
-					command.append( " --bx-home" );
-					command.append( " " + bxHome );
-				}
-
-				arguments.get( "main" ).setValue( command.toString() );
-
-				// For testing, use our test class, otherwise use BoxRunner
-				// if ( isTestEnvironment() ) {
-				// arguments.get( "main" ).setValue( "ortus.boxlang.moduleslug.TestOutputProducer " + program );
-				// } else {
-				// arguments.get( "main" ).setValue( "ortus.boxlang.runtime.BoxRunner " + program );
-				// }
-
-				// Launch the VM with a couple of quick retries to avoid transient failures
-				final int	maxAttempts	= 3;
-				int			attempt		= 1;
-				while ( true ) {
-					try {
-						vm = launchingConnector.launch( arguments );
-						LOGGER.info( "JDI VM launched successfully" );
-						// Ensure the dedicated debug execution thread is created as early as possible
-						ensureDebugExecThread();
-						break;
-					} catch ( Exception launchEx ) {
-						if ( attempt >= maxAttempts ) {
-							LOGGER.severe( "Failed to launch program after " + attempt + " attempt(s): " + launchEx.getMessage() );
-							throw launchEx;
-						}
-						LOGGER.warning( "Launch attempt " + attempt + " failed: " + launchEx.getMessage() + "; retrying..." );
-						try {
-							Thread.sleep( 300L * attempt );
-						} catch ( InterruptedException ie ) {
-							Thread.currentThread().interrupt();
-							throw launchEx;
-						}
-						attempt++;
-					}
-				}
+				this.vmConnection	= new ortus.boxlang.moduleslug.vm.LaunchedConnection( program );
+				this.vm				= vmConnection.getVirtualMachine();
 
 				// Start output monitoring as early as possible to avoid missing early program output
 				startOutputMonitoring();
@@ -231,6 +225,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				e.printStackTrace();
 				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
 			}
+
+			return null;
 		} );
 	}
 
@@ -242,23 +238,34 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		if ( !outputMonitoringStarted.compareAndSet( false, true ) ) {
 			return;
 		}
-
+		if ( vm == null || vm.process() == null ) {
+			LOGGER.info( "Output monitoring skipped: VM or process not available" );
+			return;
+		}
 		if ( outputMonitorExecutor == null ) {
 			outputMonitorExecutor = Executors.newFixedThreadPool( 2 );
 		}
+		Process process = vm.process();
+		outputMonitorExecutor.submit( () -> monitorOutputStream( process.getInputStream(), "stdout" ) );
+		outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
+		LOGGER.info( "Output monitoring started" );
+	}
 
-		// Get the process from the VM
-		if ( vm != null && vm.process() != null ) {
-			Process process = vm.process();
-
-			// Monitor stdout
-			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getInputStream(), "stdout" ) );
-
-			// Monitor stderr
-			outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
-		} else {
-			// If VM/process not ready yet, allow a later attempt via configurationDone
-			outputMonitoringStarted.set( false );
+	private String locateAgentJar() {
+		try {
+			java.nio.file.Path libs = java.nio.file.Paths.get( "build", "libs" );
+			if ( !java.nio.file.Files.isDirectory( libs ) ) {
+				return null;
+			}
+			try ( java.util.stream.Stream<java.nio.file.Path> s = java.nio.file.Files.list( libs ) ) {
+				return s.filter( p -> p.getFileName().toString().endsWith( "-agent.jar" ) )
+				    .map( p -> p.toAbsolutePath().toString() )
+				    .findFirst()
+				    .orElse( null );
+			}
+		} catch ( Exception e ) {
+			LOGGER.warning( "Agent jar search error: " + e.getMessage() );
+			return null;
 		}
 	}
 
