@@ -461,7 +461,12 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// For now, we will return an empty response
 			VariablesResponse response = new VariablesResponse();
-			response.setVariables( new org.eclipse.lsp4j.debug.Variable[ 0 ] );
+
+			this.breakpointManager.getSuspendedDebugThread()
+			    .thenAccept( debugThread -> {
+				    response.setVariables(
+				        variableManager.getVariablesFor( debugThread, args.getVariablesReference() ).toArray( new org.eclipse.lsp4j.debug.Variable[ 0 ] ) );
+			    } ).join();
 
 			// In a real implementation, you would retrieve variables based on the reference
 			LOGGER.info( "Returning empty variables response for reference: " + args.getVariablesReference() );

@@ -1,0 +1,14 @@
+function greet( name ){
+    var greeting = "Hello, " & name & "!";
+    var javaObj = new java:ortus.boxlang.runtime.scopes.Key( "sampleKey" );
+
+    var someStruct = {
+        field1: "value1",
+        field2: 42,
+        field3: [1, 2, 3],
+    };
+
+    return greeting;
+}
+
+println( greet("World") )
