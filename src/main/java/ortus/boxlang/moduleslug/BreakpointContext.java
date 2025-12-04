@@ -1,11 +1,8 @@
 package ortus.boxlang.moduleslug;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -14,7 +11,10 @@ import org.eclipse.lsp4j.debug.Source;
 
 import com.sun.jdi.AbsentInformationException;
 import com.sun.jdi.ArrayReference;
+import com.sun.jdi.ClassNotLoadedException;
+import com.sun.jdi.ClassType;
 import com.sun.jdi.IncompatibleThreadStateException;
+import com.sun.jdi.LocalVariable;
 import com.sun.jdi.Location;
 import com.sun.jdi.ObjectReference;
 import com.sun.jdi.StackFrame;
@@ -26,18 +26,18 @@ public class BreakpointContext {
 	private static final Logger	LOGGER			= Logger.getLogger( BreakpointContext.class.getName() );
 
 	private static int			stackFrameId	= 0;
-	private static int			variableId		= 0;
 
 	private int					breakpointId;
-	private ThreadReference		threadReference;
+	private ThreadReference		stoppedThread;
+	private VMController		vmController;
 	private ObjectReference		context;
 	private List<FrameTuple>	stackFrames;
-	private Map<Integer, Value>	variables		= new WeakHashMap<>();
 
-	public BreakpointContext( int breakpointId, ThreadReference threadReference ) {
-		this.breakpointId		= breakpointId;
-		this.threadReference	= threadReference;
-		this.stackFrames		= new ArrayList<>();
+	public BreakpointContext( int breakpointId, ThreadReference stoppedThread, VMController vmController ) {
+		this.breakpointId	= breakpointId;
+		this.stoppedThread	= stoppedThread;
+		this.vmController	= vmController;
+		this.stackFrames	= new ArrayList<>();
 
 		this.transformStackFrames();
 	}
@@ -59,7 +59,7 @@ public class BreakpointContext {
 	}
 
 	public ThreadReference getThreadReference() {
-		return threadReference;
+		return stoppedThread;
 	}
 
 	public ObjectReference getContext() {
@@ -67,7 +67,7 @@ public class BreakpointContext {
 	}
 
 	public void resume() {
-		threadReference.resume();
+		stoppedThread.resume();
 	}
 
 	public List<org.eclipse.lsp4j.debug.StackFrame> getStackFrames() {
@@ -76,7 +76,7 @@ public class BreakpointContext {
 		    .collect( Collectors.toList() );
 	}
 
-	public CompletableFuture<List<Value>> getVisibleScopes( ThreadReference invokeThread, int frameId ) {
+	public CompletableFuture<List<Value>> getVisibleScopes( int frameId ) {
 		var frameTuple = stackFrames.stream()
 		    .filter( frame -> frame.id == frameId )
 		    .findFirst();
@@ -87,38 +87,33 @@ public class BreakpointContext {
 
 		var context = findNearestContextByFrameId( frameId );
 
-		return context.map( ctx -> invokeGetVisibleScopes( invokeThread, ctx ) )
+		return context.map( ctx -> invokeGetVisibleScopes( ctx ) )
 		    .orElse( CompletableFuture.completedFuture( new ArrayList<Value>() ) );
 	}
 
-	private CompletableFuture<List<Value>> invokeGetVisibleScopes( ThreadReference invokeThread, ObjectReference boxContext ) {
-		return Util.invokeAsync( invokeThread, boxContext, "getVisibleScopes", "()Lortus/boxlang/runtime/types/IStruct;", new ArrayList<Value>() )
-		    .handle( ( result, error ) -> {
-			    if ( error != null ) {
-				    return new ArrayList<>();
-			    }
-
-			    return Util.invokeAsync(
-			        invokeThread,
+	private CompletableFuture<List<Value>> invokeGetVisibleScopes( ObjectReference boxContext ) {
+		return vmController.invoke( boxContext, "getVisibleScopes", new ArrayList<>(), new ArrayList<Value>() )
+		    .thenCompose( ( result ) -> {
+			    return vmController.invoke(
 			        ( ObjectReference ) result,
 			        "get",
-			        "(Ljava/lang/String;)Ljava/lang/Object;",
-			        Arrays.asList( invokeThread.virtualMachine().mirrorOf( "contextual" ) )
-			    ).join();
+			        List.of( "java.lang.String" ),
+			        List.of( vmController.vm.mirrorOf( "contextual" ) )
+			    );
 		    } )
-		    .thenCompose( scopeStruct -> Util.invokeAsync(
-		        invokeThread,
-		        ( ObjectReference ) scopeStruct,
-		        "values",
-		        "()Ljava/util/Collection;",
-		        Arrays.asList()
-		    ) )
-		    .thenCompose( scopeList -> Util.invokeAsync(
-		        invokeThread,
+		    .thenCompose( scopeStruct -> {
+			    return vmController.invoke(
+			        ( ObjectReference ) scopeStruct,
+			        "values",
+			        List.of(),
+			        List.of()
+			    );
+		    } )
+		    .thenCompose( scopeList -> vmController.invoke(
 		        ( ObjectReference ) scopeList,
 		        "toArray",
-		        "()[Ljava/lang/Object;",
-		        Arrays.asList()
+		        List.of(),
+		        List.of()
 		    ) )
 		    .thenApply( arrayOfScopes -> {
 
@@ -143,7 +138,7 @@ public class BreakpointContext {
 		    .map( ft -> ft.jdiFrame() )
 		    .collect( Collectors.toList() );
 
-		return Util.findNearestContext( toSearch );
+		return findNearestContext( toSearch );
 	}
 
 	/**
@@ -151,7 +146,7 @@ public class BreakpointContext {
 	 */
 	private void transformStackFrames() {
 		try {
-			this.stackFrames = threadReference.frames()
+			this.stackFrames = stoppedThread.frames()
 			    .stream()
 			    .map( frame -> {
 				    org.eclipse.lsp4j.debug.StackFrame dapFrame = new org.eclipse.lsp4j.debug.StackFrame();
@@ -203,6 +198,56 @@ public class BreakpointContext {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
+	}
+
+	private ObjectReference findContextForFrame( StackFrame frame ) {
+		try {
+			for ( var visibleVariable : frame.visibleVariables() ) {
+
+				if ( isBoxContext( visibleVariable ) ) {
+					return ( ObjectReference ) frame.getValue( visibleVariable );
+				}
+			}
+		} catch ( AbsentInformationException e ) {
+			LOGGER.severe( "Unable to get context for frame: " + e.getMessage() );
+		}
+		return null;
+	}
+
+	private boolean isBoxContext( LocalVariable variable ) {
+		try {
+
+			var type = variable.type();
+
+			if ( type.name().equalsIgnoreCase( "ortus.boxlang.runtime.context.IBoxContext" ) ) {
+				return true;
+			}
+
+			if ( ! ( type instanceof ClassType ) ) {
+				return false;
+			}
+
+			var isBoxContext = ( ( ClassType ) type ).allInterfaces()
+			    .stream()
+			    .anyMatch( iname -> iname.name().equalsIgnoreCase( "ortus.boxlang.runtime.context.IBoxContext" ) );
+
+			return isBoxContext;
+		} catch ( ClassNotLoadedException exception ) {
+			LOGGER.severe( "Class not loaded: " + exception.getMessage() );
+		}
+
+		return false;
+	}
+
+	private Optional<ObjectReference> findNearestContext( List<StackFrame> frames ) {
+		for ( var frame : frames ) {
+			var context = findContextForFrame( frame );
+			if ( context != null ) {
+				return Optional.of( context );
+			}
+		}
+
+		return Optional.empty();
 	}
 
 }

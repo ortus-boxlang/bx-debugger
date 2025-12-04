@@ -21,6 +21,7 @@ import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
 import org.eclipse.lsp4j.debug.EvaluateResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
+import org.eclipse.lsp4j.debug.NextArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.Scope;
 import org.eclipse.lsp4j.debug.ScopesArguments;
@@ -40,7 +41,6 @@ import org.eclipse.lsp4j.debug.VariablesResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
-import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
 
@@ -57,7 +57,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private VirtualMachine									vm;
 	private IDebugProtocolClient							client;
 	private ExecutorService									outputMonitorExecutor;
-	private BreakpointManager								breakpointManager;
+	private VMController									vmController;
+	private VariableManager									variableManager;
 	private SourceManager									sourceManager			= new SourceManager();
 	// Ensure we only start output monitoring once per session
 	private final java.util.concurrent.atomic.AtomicBoolean	outputMonitoringStarted	= new java.util.concurrent.atomic.AtomicBoolean( false );
@@ -69,7 +70,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private volatile boolean								sessionCleaned			= false;
 	private volatile boolean								terminatedEventSent		= false;
 	private final Object									exitLock				= new Object();
-	private VariableManager									variableManager			= new VariableManager();
 
 	private IVMConnection									vmConnection			= null;
 
@@ -89,7 +89,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsConfigurationDoneRequest( true );
 		capabilities.setSupportsTerminateRequest( true );
 		capabilities.setSupportsConditionalBreakpoints( true );
-		capabilities.setSupportsEvaluateForHovers( true );
+		capabilities.setSupportsEvaluateForHovers( false );
 		capabilities.setSupportTerminateDebuggee( true );
 		capabilities.setSupportsTerminateRequest( true );
 
@@ -121,7 +121,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		CompletableFuture.supplyAsync( () -> {
 			try {
-				Thread.sleep( 1000 );
+				Thread.sleep( 3000 );
 				client.initialized();
 			} catch ( InterruptedException e ) {
 				// TODO Auto-generated catch block
@@ -160,16 +160,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			// Initialize breakpoint manager
-			if ( breakpointManager == null ) {
-				breakpointManager = new BreakpointManager( vm, client );
+			if ( vmController == null ) {
+				vmController = new VMController( vm, client );
 			} else {
 				// If you want to migrate pending breakpoints (mirrors launch logic)
-				BreakpointManager old = breakpointManager;
-				breakpointManager = new BreakpointManager( vm, client );
+				VMController old = vmController;
+				vmController = new VMController( vm, client );
 				old.getAllPendingBreakpoints().forEach( ( path, list ) -> {
-					list.forEach( p -> breakpointManager.storePendingBreakpoint( p.getSource(), p.getSourceBreakpoint(), p.getBreakpoint() ) );
+					list.forEach( p -> vmController.storePendingBreakpoint( p.getSource(), p.getSourceBreakpoint(), p.getBreakpoint() ) );
 				} );
 			}
+
+			this.variableManager = new VariableManager( vmController );
 
 			startOutputMonitoring(); // may be a no-op if remote
 			return null;
@@ -197,17 +199,17 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				startOutputMonitoring();
 
 				// Initialize or update breakpoint manager with the VM
-				if ( breakpointManager == null ) {
-					breakpointManager = new BreakpointManager( vm, client );
+				if ( vmController == null ) {
+					vmController = new VMController( vm, client );
 				} else {
 					// Transfer pending breakpoints to a new manager with the VM
-					BreakpointManager oldManager = breakpointManager;
-					breakpointManager = new BreakpointManager( vm, client );
+					VMController oldManager = vmController;
+					vmController = new VMController( vm, client );
 
 					// Transfer pending breakpoints from the temporary manager
-					for ( Map.Entry<String, List<BreakpointManager.PendingBreakpoint>> entry : oldManager.getAllPendingBreakpoints().entrySet() ) {
-						for ( BreakpointManager.PendingBreakpoint pending : entry.getValue() ) {
-							breakpointManager.storePendingBreakpoint(
+					for ( Map.Entry<String, List<VMController.PendingBreakpoint>> entry : oldManager.getAllPendingBreakpoints().entrySet() ) {
+						for ( VMController.PendingBreakpoint pending : entry.getValue() ) {
+							vmController.storePendingBreakpoint(
 							    pending.getSource(),
 							    pending.getSourceBreakpoint(),
 							    pending.getBreakpoint()
@@ -216,6 +218,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					}
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
+
+				this.variableManager = new VariableManager( vmController );
 
 				// client.initialized();
 
@@ -249,24 +253,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		outputMonitorExecutor.submit( () -> monitorOutputStream( process.getInputStream(), "stdout" ) );
 		outputMonitorExecutor.submit( () -> monitorOutputStream( process.getErrorStream(), "stderr" ) );
 		LOGGER.info( "Output monitoring started" );
-	}
-
-	private String locateAgentJar() {
-		try {
-			java.nio.file.Path libs = java.nio.file.Paths.get( "build", "libs" );
-			if ( !java.nio.file.Files.isDirectory( libs ) ) {
-				return null;
-			}
-			try ( java.util.stream.Stream<java.nio.file.Path> s = java.nio.file.Files.list( libs ) ) {
-				return s.filter( p -> p.getFileName().toString().endsWith( "-agent.jar" ) )
-				    .map( p -> p.toAbsolutePath().toString() )
-				    .findFirst()
-				    .orElse( null );
-			}
-		} catch ( Exception e ) {
-			LOGGER.warning( "Agent jar search error: " + e.getMessage() );
-			return null;
-		}
 	}
 
 	/**
@@ -337,12 +323,12 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Verify and set pending breakpoints using the BreakpointManager
 	 */
 	private void verifyAndSetPendingBreakpoints() {
-		if ( breakpointManager == null ) {
+		if ( vmController == null ) {
 			LOGGER.warning( "BreakpointManager not available, cannot set breakpoints" );
 			return;
 		}
 
-		breakpointManager.verifyAndSetPendingBreakpoints();
+		vmController.verifyAndSetPendingBreakpoints();
 	}
 
 	@Override
@@ -352,23 +338,23 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			List<Breakpoint>		responseBreakpoints	= new ArrayList<>();
 
 			// Initialize breakpoint manager if not yet available (before launch)
-			if ( breakpointManager == null ) {
+			if ( vmController == null ) {
 				// Create a temporary breakpoint manager for pending breakpoint storage
 				// This will be replaced with a proper one when launch() is called
-				breakpointManager = new BreakpointManager( null, client );
+				vmController = new VMController( null, client );
 				LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
 			}
 
 			// Clear existing pending breakpoints for this file first
 			// (setBreakpoints replaces all breakpoints for the file)
 			if ( args.getSource() != null && args.getSource().getPath() != null ) {
-				breakpointManager.clearPendingBreakpointsForFile( args.getSource().getPath() );
+				vmController.clearPendingBreakpointsForFile( args.getSource().getPath() );
 			}
 
 			if ( args.getBreakpoints() != null ) {
 				for ( SourceBreakpoint sourceBreakpoint : args.getBreakpoints() ) {
 					// Use the encapsulated method to track the breakpoint
-					Breakpoint breakpoint = breakpointManager.trackSourceBreakpoint( args.getSource(), sourceBreakpoint );
+					Breakpoint breakpoint = vmController.trackSourceBreakpoint( args.getSource(), sourceBreakpoint );
 					responseBreakpoints.add( breakpoint );
 				}
 			}
@@ -376,6 +362,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
 
 			return response;
+		} );
+	}
+
+	public CompletableFuture<Void> next( NextArguments args ) {
+
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Next request received for thread: " + args.getThreadId() );
+
+			if ( vmController == null ) {
+				LOGGER.warning( "BreakpointManager not available for Next request" );
+				return null;
+			}
+
+			// Perform step in for the specified thread
+			vmController.stepThread( args.getThreadId() );
+
+			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
+			return null;
 		} );
 	}
 
@@ -416,22 +420,19 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				LOGGER.info( "Scopes request received for frame: " + args.getFrameId() );
 
-				ScopesResponse						response			= new ScopesResponse();
-				Optional<BreakpointContext>			breakpointContext	= this.breakpointManager.getBreakpointContextbyStackFrame( args.getFrameId() );
+				ScopesResponse				response			= new ScopesResponse();
+				Optional<BreakpointContext>	breakpointContext	= this.vmController.getBreakpointContextbyStackFrame( args.getFrameId() );
 
-				CompletableFuture<ThreadReference>	debugThreadFuture	= this.breakpointManager.getSuspendedDebugThread();
-				CompletableFuture<List<Value>>		scopeValueFuture	= debugThreadFuture.thenCompose( debugThread -> {
-																			return breakpointContext
-																			    .map( context -> context.getVisibleScopes( debugThread, args.getFrameId() ) )
-																			    .orElseGet( () -> CompletableFuture.completedFuture( new ArrayList<>() ) );
-																		} );
-
-				List<Scope>							scopes				= debugThreadFuture.thenCombine( scopeValueFuture, ( debugThread, scopeList ) -> {
-																			return scopeList.stream()
-																			    .map(
-																			        scope -> this.variableManager.convertScopeToDAPScope( debugThread, scope ) )
-																			    .collect( Collectors.toList() );
-																		} )
+				List<Scope>					scopes				= breakpointContext
+				    .map( context -> context.getVisibleScopes( args.getFrameId() ) )
+				    .orElseGet( () -> CompletableFuture.completedFuture( new ArrayList<Value>() ) )
+				    .thenApply( scopeList -> {
+																	    return scopeList
+																	        .stream()
+																	        .map( scope -> ( Scope ) variableManager
+																	            .convertScopeToDAPScope( scope ) )
+																	        .collect( Collectors.toList() );
+																    } )
 				    .exceptionally( e -> {
 					    LOGGER.severe( "Error getting suspended debug thread: " + e.getMessage() );
 					    return new ArrayList<>();
@@ -462,14 +463,14 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// For now, we will return an empty response
 			VariablesResponse response = new VariablesResponse();
 
-			this.breakpointManager.getSuspendedDebugThread()
-			    .thenAccept( debugThread -> {
-				    response.setVariables(
-				        variableManager.getVariablesFor( debugThread, args.getVariablesReference() ).toArray( new org.eclipse.lsp4j.debug.Variable[ 0 ] ) );
-			    } ).join();
+			try {
+				response.setVariables(
+				    variableManager.getVariablesFor( args.getVariablesReference() ).toArray( new org.eclipse.lsp4j.debug.Variable[ 0 ] ) );
+			} catch ( Exception e ) {
+				LOGGER.severe( "Error processing variables request: " + e.getMessage() );
+				e.printStackTrace();
+			}
 
-			// In a real implementation, you would retrieve variables based on the reference
-			LOGGER.info( "Returning empty variables response for reference: " + args.getVariablesReference() );
 			return response;
 		} );
 	}
@@ -551,7 +552,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private StackTraceResponse handleStackTraceRequest( int threadId, String mode, Integer startFrame, Integer levels ) {
 		StackTraceResponse response = new StackTraceResponse();
 
-		if ( vm == null || breakpointManager == null ) {
+		if ( vm == null || vmController == null ) {
 			LOGGER.warning( "VM or breakpoint manager not available for stack trace" );
 			response.setStackFrames( new StackFrame[ 0 ] );
 			response.setTotalFrames( 0 );
@@ -560,7 +561,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		try {
 			// Get all stack frames from the breakpoint manager
-			List<StackFrame>		allFrames		= breakpointManager.getBreakpointContextByThread( threadId )
+			List<StackFrame>		allFrames		= vmController.getBreakpointContextByThread( threadId )
 			    .map( ctx -> ctx.getStackFrames() )
 			    .orElse( new ArrayList<>() );
 
@@ -758,8 +759,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		try {
 			// Stop breakpoint event processing
-			if ( breakpointManager != null ) {
-				breakpointManager.stopEventProcessing();
+			if ( vmController != null ) {
+				vmController.stopEventProcessing();
 			}
 
 			// Shutdown output monitoring
@@ -814,19 +815,17 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	@Override
 	public CompletableFuture<Void> configurationDone( org.eclipse.lsp4j.debug.ConfigurationDoneArguments args ) {
 		return CompletableFuture.supplyAsync( () -> {
+
 			LOGGER.info( "Configuration done request received" );
 
 			// Set actual breakpoints for all pending breakpoints
 			verifyAndSetPendingBreakpoints();
 
 			// Start breakpoint event processing
-			breakpointManager.startEventProcessing();
+			vmController.startEventProcessing();
 
 			// Start output monitoring using the VM's process
 			startOutputMonitoring();
-
-			// Create/invoke debug exec thread inside the VM
-			ensureDebugExecThread();
 
 			// Mark session as active and start process monitoring
 			sessionCleaned = false;
@@ -838,7 +837,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// can proceed with execution
 
 			// If we have a VM running and breakpoints are set, we can now proceed
-			if ( vm != null && breakpointManager != null ) {
+			if ( vm != null && vmController != null ) {
 				LOGGER.info( "Configuration done: VM is running, breakpoints are ready" );
 
 				// Resume execution if the VM is suspended
@@ -869,40 +868,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		} );
 	}
 
-	/**
-	 * Ensure the VM has a dedicated debug execution thread by invoking
-	 * DebugExecService.start() inside the target VM via JDI.
-	 */
-	private void ensureDebugExecThread() {
-		if ( vm == null )
-			return;
-		try {
-			// TODO move into breakpointmanager
-			// TODO Load this agent using a dynamic path
-			String								id			= String.valueOf( vm.process().pid() );
-			com.sun.tools.attach.VirtualMachine	attachVM	= com.sun.tools.attach.VirtualMachine.attach( id );
-			vm.resume();
-			attachVM.loadAgent( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\@MODULE_SLUG@-1.0.0-snapshot-agent.jar" );
-			attachVM.detach();
-			vm.suspend();
-
-		} catch ( Throwable e ) {
-			java.util.logging.Logger.getLogger( BoxDebugServer.class.getName() ).warning( "Failed to start debug exec thread: " + e.getMessage() );
-		}
-	}
-
 	@Override
 	public CompletableFuture<ContinueResponse> continue_( org.eclipse.lsp4j.debug.ContinueArguments args ) {
 		return CompletableFuture.supplyAsync( () -> {
 			LOGGER.info( "Continue request received for thread: " + args.getThreadId() );
 
-			if ( breakpointManager == null ) {
+			if ( vmController == null ) {
 				LOGGER.warning( "BreakpointManager not available for continue request" );
 				return new ContinueResponse();
 			}
 
 			// Resume execution for all threads to ensure the VM resumes from suspended state
-			breakpointManager.getBreakpointContextByThread( args.getThreadId() ).ifPresent( context -> {
+			vmController.getBreakpointContextByThread( args.getThreadId() ).ifPresent( context -> {
 				context.resume();
 			} );
 

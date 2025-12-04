@@ -8,6 +8,7 @@ public class DebugAgent {
 
 	public static void agentmain( String agentArgs, Instrumentation inst ) {
 		System.out.println( "[DebugAgent] Agent attached!" );
+		DebuggerHelper.start();
 
 		Thread debugThread = new Thread( () -> {
 			workerLoop();
@@ -32,7 +33,7 @@ public class DebugAgent {
 			while ( true ) {
 				try {
 					methodEntryBreakpoinHook();
-					System.out.println( "IN THE WORKERLOOP" );
+					// System.out.println( "IN THE WORKERLOOP" );
 					Thread.sleep( 100 ); // Simulate work or wait
 					// lock.wait(); // park until work is available
 				} catch ( InterruptedException ignored ) {

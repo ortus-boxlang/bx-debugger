@@ -17,7 +17,7 @@ public interface IVMConnection {
 			vm.resume();
 			attachVM.loadAgent( getDebugAgentPath() );
 			attachVM.detach();
-			vm.suspend();
+			// vm.suspend();
 
 			java.util.logging.Logger.getLogger( IVMConnection.class.getName() ).info( "Debug agent loaded successfully" );
 
@@ -44,7 +44,8 @@ public interface IVMConnection {
 			Path	jarDir			= jarPath.getParent();
 
 			// Create a path relative to the JAR directory
-			Path	relativePath	= jarDir.resolve( "bx-debugger-agent.jar" );
+			// Path relativePath = jarDir.resolve( "bx-debugger-agent.jar" );
+			Path	relativePath	= Paths.get( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\@MODULE_SLUG@-1.0.0-snapshot-agent.jar" );
 
 			return relativePath.toString();
 		} catch ( URISyntaxException e ) {

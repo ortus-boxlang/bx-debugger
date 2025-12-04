@@ -21,7 +21,6 @@ import com.sun.jdi.IntegerValue;
 import com.sun.jdi.LongValue;
 import com.sun.jdi.ObjectReference;
 import com.sun.jdi.StringReference;
-import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
 
 import ortus.boxlang.runtime.dynamic.casters.StringCaster;
@@ -30,8 +29,12 @@ public class VariableManager {
 
 	private static final Logger	LOGGER		= Logger.getLogger( VariableManager.class.getName() );
 	private int					variableId	= 0;
-
+	private VMController		vmController;
 	private Map<Integer, Value>	variables	= new WeakHashMap<>();
+
+	public VariableManager( VMController vmController ) {
+		this.vmController = vmController;
+	}
 
 	public int put( Value value ) {
 		variableId++;
@@ -43,15 +46,15 @@ public class VariableManager {
 		return variables.get( id );
 	}
 
-	public List<Variable> getVariablesFor( ThreadReference invokeThread, int id ) {
+	public List<Variable> getVariablesFor( int id ) {
 		var variable = variables.get( id );
 
 		if ( isStruct( variable ) ) {
-			return gerVariablesFromStruct( invokeThread, ( ObjectReference ) variable );
+			return gerVariablesFromStruct( ( ObjectReference ) variable );
 		} else if ( isArray( variable ) ) {
-			return gerVariablesFromArray( invokeThread, ( ObjectReference ) variable );
+			return gerVariablesFromArray( ( ObjectReference ) variable );
 		} else if ( isPOJO( variable ) ) {
-			return gerVariablesFromPojo( invokeThread, ( ObjectReference ) variable );
+			return gerVariablesFromPojo( ( ObjectReference ) variable );
 		}
 
 		return List.of();
@@ -70,30 +73,18 @@ public class VariableManager {
 		return -1;
 	}
 
-	public Scope convertScopeToDAPScope( ThreadReference invokeThread, Value scopeValue ) {
+	public Scope convertScopeToDAPScope( Value scopeValue ) {
 		Scope	scope	= new Scope();
 
-		String	name	= Util.invokeAsync(
-		    invokeThread,
-		    ( ObjectReference ) scopeValue,
-		    "getName",
-		    "()Lortus/boxlang/runtime/scopes/Key;",
-		    new ArrayList<Value>()
-		)
-		    .thenCompose( key -> Util.invokeAsync(
-		        invokeThread,
-		        ( ObjectReference ) key,
-		        "getName",
-		        "()Ljava/lang/String;",
-		        new ArrayList<Value>()
-		    ) )
+		String	name	= this.vmController.invoke( ( ObjectReference ) scopeValue, "getName", new ArrayList<String>(), new ArrayList<Value>() )
+		    .thenCompose( key -> this.vmController.invoke( ( ObjectReference ) key, "getName", new ArrayList<String>(), new ArrayList<Value>() ) )
 		    .thenApply( nameValue -> {
-			    if ( nameValue instanceof StringReference ref ) {
-				    return ref.value();
-			    }
+							    if ( nameValue instanceof StringReference ref ) {
+								    return ref.value();
+							    }
 
-			    return "Unknown Scope";
-		    } )
+							    return "Unknown Scope";
+						    } )
 		    .exceptionally( e -> {
 			    LOGGER.severe( "Error getting scope name: " + e.getMessage() );
 			    return "Unknown Scope";
@@ -104,6 +95,8 @@ public class VariableManager {
 		scope.setVariablesReference( variableId++ );
 
 		this.variables.put( scope.getVariablesReference(), scopeValue );
+
+		LOGGER.info( "Scope created with name: " + name + " and variablesReference: " + scope.getVariablesReference() );
 
 		return scope;
 	}
@@ -117,16 +110,10 @@ public class VariableManager {
 		    .stream().anyMatch( ( i ) -> i.name().equalsIgnoreCase( "ortus.boxlang.runtime.types.IStruct" ) );
 	}
 
-	private List<Variable> gerVariablesFromArray( ThreadReference invokeThread, ObjectReference array ) {
+	private List<Variable> gerVariablesFromArray( ObjectReference array ) {
 		ArrayReference table;
 		try {
-			table = ( ArrayReference ) Util.invokeAsync(
-			    invokeThread,
-			    ( ObjectReference ) array,
-			    "toArray",
-			    "()[Ljava/lang/Object;",
-			    new ArrayList<Value>()
-			).get();
+			table = ( ArrayReference ) this.vmController.invoke( array, "toArray", new ArrayList<String>(), new ArrayList<Value>() ).get();
 		} catch ( InterruptedException e ) {
 			LOGGER.severe( "Interrupted getting array values: " + e.getMessage() );
 
@@ -139,13 +126,13 @@ public class VariableManager {
 		List<Variable> vars = new ArrayList<Variable>();
 
 		for ( int i = 0; i < table.length(); i++ ) {
-			vars.add( convertValueToVariable( invokeThread, Integer.toString( i + 1 ), table.getValue( i ) ) );
+			vars.add( convertValueToVariable( Integer.toString( i + 1 ), table.getValue( i ) ) );
 		}
 
 		return vars;
 	}
 
-	private List<Variable> gerVariablesFromPojo( ThreadReference invokeThread, ObjectReference pojo ) {
+	private List<Variable> gerVariablesFromPojo( ObjectReference pojo ) {
 		// in this case we want to get the properties of the POJO
 		List<Variable> vars = new ArrayList<Variable>();
 
@@ -155,84 +142,58 @@ public class VariableManager {
 				continue;
 			}
 			Value val = pojo.getValue( field );
-			vars.add( convertValueToVariable( invokeThread, field.name(), val ) );
+			vars.add( convertValueToVariable( field.name(), val ) );
 		}
 
 		return vars;
 	}
 
-	private List<Variable> gerVariablesFromStruct( ThreadReference invokeThread, ObjectReference struct ) {
+	private List<Variable> gerVariablesFromStruct( ObjectReference struct ) {
 		try {
-			return Util.invokeAsync(
-			    invokeThread,
-			    struct,
-			    "entrySet",
-			    "()Ljava/util/Set;",
-			    new ArrayList<Value>()
-			).thenCompose( ref -> Util.invokeAsync(
-			    invokeThread,
-			    ( ObjectReference ) ref,
-			    "toArray",
-			    "()[Ljava/lang/Object;",
-			    new ArrayList<Value>()
-			) ).thenApply( ref -> {
-				return ( ( ArrayReference ) ref ).getValues();
-			} ).thenApply( values -> {
-				return values.stream()
-				    .filter( entry -> entry != null )
-				    .map( entry -> {
-					    try {
-						    String keyName = getNameFromEntry( invokeThread, entry ).join();
-						    Value val	= getValueFromEntry( invokeThread, entry ).join();
-						    return convertValueToVariable( invokeThread, keyName, val );
+			return this.vmController.invoke( struct, "entrySet", new ArrayList<String>(), new ArrayList<Value>() )
+			    .thenCompose( ref -> this.vmController.invoke( ( ObjectReference ) ref, "toArray", new ArrayList<String>(), new ArrayList<Value>() ) )
+			    .thenApply( ref -> {
+				    return ( ( ArrayReference ) ref ).getValues();
+			    } ).thenApply( values -> {
+				    return values.stream()
+				        .filter( entry -> entry != null )
+				        .map( entry -> {
+					        try {
+						        String keyName = getNameFromEntry( entry ).join();
+						        Value val = getValueFromEntry( entry ).join();
+						        return convertValueToVariable( keyName, val );
 
-					    } catch ( Exception e ) {
-						    LOGGER.severe( "Error getting key name from struct entry: " + e.getMessage() );
+					        } catch ( Exception e ) {
+						        LOGGER.severe( "Error getting key name from struct entry: " + e.getMessage() );
 
-						    Variable var = new Variable();
-						    var.setName( "UnknownKey" );
-						    var.setValue( "Error getting key name from struct entry: " + e.getMessage() );
-						    return var;
-					    }
-				    } ).toList();
-			} ).get();
+						        Variable var = new Variable();
+						        var.setName( "UnknownKey" );
+						        var.setValue( "Error getting key name from struct entry: " + e.getMessage() );
+						        return var;
+					        }
+				        } ).toList();
+			    } ).get();
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error getting variables from struct: " + e.getMessage() );
 			return new ArrayList<Variable>();
 		}
 	}
 
-	private CompletableFuture<String> getNameFromEntry( ThreadReference invokeThread, Value entry ) {
-		return Util.invokeAsync(
-		    invokeThread,
-		    ( ObjectReference ) entry,
-		    "getKey",
-		    "()Ljava/lang/Object;",
-		    new ArrayList<Value>()
-		).thenApply( keyValue -> {
-			return Util.invokeAsync(
-			    invokeThread,
-			    ( ObjectReference ) keyValue,
-			    "getOriginalValue",
-			    "()Ljava/lang/Object;",
-			    new ArrayList<Value>()
-			).thenApply( originalValue -> {
-				if ( originalValue instanceof StringReference strRef ) {
-					return strRef.value();
-				}
-				return "UnknownKey";
-			} );
-		} ).thenCompose( nameFuture -> nameFuture );
+	private CompletableFuture<String> getNameFromEntry( Value entry ) {
+		return this.vmController.invoke( ( ObjectReference ) entry, "getKey", new ArrayList<String>(), new ArrayList<Value>() )
+		    .thenApply( keyValue -> {
+			    return this.vmController.invoke( ( ObjectReference ) keyValue, "getOriginalValue", new ArrayList<String>(), new ArrayList<Value>() )
+			        .thenApply( originalValue -> {
+				        if ( originalValue instanceof StringReference strRef ) {
+					        return strRef.value();
+				        }
+				        return "UnknownKey";
+			        } );
+		    } ).thenCompose( nameFuture -> nameFuture );
 	}
 
-	private CompletableFuture<Value> getValueFromEntry( ThreadReference invokeThread, Value entry ) {
-		return Util.invokeAsync(
-		    invokeThread,
-		    ( ObjectReference ) entry,
-		    "getValue",
-		    "()Ljava/lang/Object;",
-		    new ArrayList<Value>()
-		);
+	private CompletableFuture<Value> getValueFromEntry( Value entry ) {
+		return this.vmController.invoke( ( ObjectReference ) entry, "getValue", new ArrayList<String>(), new ArrayList<Value>() );
 	}
 
 	private boolean isOfType( Value val, String type ) {
@@ -245,7 +206,7 @@ public class VariableManager {
 		    && ctype.superclass().name().equalsIgnoreCase( type );
 	}
 
-	private Variable convertValueToVariable( ThreadReference invokeThread, String name, Value val ) {
+	private Variable convertValueToVariable( String name, Value val ) {
 		Variable var = new Variable();
 		var.setType( "null" );
 		var.setValue( "" );
@@ -270,7 +231,7 @@ public class VariableManager {
 			var.setValue( StringCaster.cast( bigDecimal.doubleValue() ) );
 			var.setType( "numeric" );
 		} else if ( isOfType( val, "ortus.boxlang.runtime.types.DateTime" ) ) {
-			var.setValue( castToDateTimeString( invokeThread, val ) );
+			var.setValue( castToDateTimeString( val ) );
 			var.setType( "DateTime" );
 		} else if ( isOfType( val, "java.lang.Boolean" ) ) {
 			var.setValue( castToBooleanString( val ) );
@@ -313,25 +274,20 @@ public class VariableManager {
 		return var;
 	}
 
-	private String castToDateTimeString( ThreadReference invokeThread, Value value ) {
-		return Util.invokeAsync(
-		    invokeThread,
-		    ( ObjectReference ) value,
-		    "toISOString",
-		    "()Ljava/lang/String;",
-		    new ArrayList<Value>()
-		).handle( ( val, e ) -> {
-			if ( e != null ) {
-				LOGGER.severe( "Error casting DateTime to string: " + e.getMessage() );
-				return "Error casting DateTime to string: " + e.getMessage();
-			}
+	private String castToDateTimeString( Value value ) {
+		return this.vmController.invoke( ( ObjectReference ) value, "toISOString", new ArrayList<String>(), new ArrayList<Value>() )
+		    .handle( ( val, e ) -> {
+			    if ( e != null ) {
+				    LOGGER.severe( "Error casting DateTime to string: " + e.getMessage() );
+				    return "Error casting DateTime to string: " + e.getMessage();
+			    }
 
-			if ( val instanceof StringReference strRef ) {
-				return strRef.value().toString();
-			}
+			    if ( val instanceof StringReference strRef ) {
+				    return strRef.value().toString();
+			    }
 
-			return "Unknown DateTime";
-		} ).join();
+			    return "Unknown DateTime";
+		    } ).join();
 	}
 
 	private String castToBooleanString( Value value ) {

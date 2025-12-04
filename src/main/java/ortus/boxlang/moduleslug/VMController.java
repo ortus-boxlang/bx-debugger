@@ -12,6 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
@@ -24,8 +25,10 @@ import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import com.sun.jdi.AbsentInformationException;
 import com.sun.jdi.IncompatibleThreadStateException;
 import com.sun.jdi.Location;
+import com.sun.jdi.ObjectReference;
 import com.sun.jdi.ReferenceType;
 import com.sun.jdi.ThreadReference;
+import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
 import com.sun.jdi.event.BreakpointEvent;
 import com.sun.jdi.event.ClassPrepareEvent;
@@ -34,6 +37,7 @@ import com.sun.jdi.event.EventIterator;
 import com.sun.jdi.event.EventQueue;
 import com.sun.jdi.event.EventSet;
 import com.sun.jdi.event.MethodEntryEvent;
+import com.sun.jdi.event.StepEvent;
 import com.sun.jdi.event.VMDeathEvent;
 import com.sun.jdi.event.VMDisconnectEvent;
 import com.sun.jdi.request.BreakpointRequest;
@@ -41,15 +45,16 @@ import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.MethodEntryRequest;
+import com.sun.jdi.request.StepRequest;
 
 /**
  * Manages JDI breakpoints and handles breakpoint events
  */
-public class BreakpointManager {
+public class VMController {
 
-	private static final Logger												LOGGER						= Logger.getLogger( BreakpointManager.class.getName() );
+	private static final Logger												LOGGER						= Logger.getLogger( VMController.class.getName() );
 
-	private final VirtualMachine											vm;
+	public final VirtualMachine												vm;
 	private final IDebugProtocolClient										client;
 	private final List<BreakpointRequest>									activeBreakpoints			= new CopyOnWriteArrayList<>();
 	private final List<PendingBreakpointInfo>								pendingBreakpoints			= new CopyOnWriteArrayList<>();
@@ -65,6 +70,12 @@ public class BreakpointManager {
 
 	private MethodEntryRequest												methodEntryRequest			= null;
 	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue		= new ConcurrentLinkedQueue<>();
+	private Map<Long, StepRequest>											stepRequests				= new ConcurrentHashMap<>();
+	private Map<Long, EventSet>												eventSets					= new ConcurrentHashMap<>();
+
+	private MethodEntryRequest												methodEntryRequestDebugger	= null;
+	private CompletableFuture<Void>											debugFuture					= null;
+	private ThreadReference													debugThread					= null;
 
 	/**
 	 * Represents a DAP breakpoint that has been requested but not yet verified
@@ -126,7 +137,7 @@ public class BreakpointManager {
 		}
 	}
 
-	public BreakpointManager( VirtualMachine vm, IDebugProtocolClient client ) {
+	public VMController( VirtualMachine vm, IDebugProtocolClient client ) {
 		this.vm		= vm;
 		this.client	= client;
 
@@ -137,20 +148,87 @@ public class BreakpointManager {
 		}
 	}
 
+	public CompletableFuture<Value> invokeStatic( String className, String methodName, List<String> paramTypes, List<Value> args ) {
+		return InvokeTools.submitAndInvokeStatic( this, className, methodName, paramTypes, args );
+	}
+
+	public CompletableFuture<Value> invoke( ObjectReference obj, String methodName, List<String> paramTypes, List<Value> args ) {
+		return InvokeTools.submitAndInvoke( this, obj, methodName, paramTypes, args );
+	}
+
+	public CompletableFuture<Void> pauseDebugThread() {
+		// create other debug thread request
+		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
+		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		this.methodEntryRequestDebugger.enable();
+		LOGGER.info( "Set up method entry request for DebugAgent" );
+		this.debugFuture = new CompletableFuture<>();
+
+		return this.debugFuture;
+	}
+
+	public ThreadReference getPreparedDebugInvokeThread() {
+		try {
+
+			if ( debugThread.suspendCount() == 0 ) {
+				pauseDebugThread().get();
+			}
+
+			return debugThread;
+		} catch ( InterruptedException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch ( ExecutionException e ) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+		return null;
+	}
+
 	public CompletableFuture<ThreadReference> getSuspendedDebugThread() {
 		var debug = getDebugThread();
 		if ( !methodEntryRequest.isEnabled() && debug.isSuspended() ) {
 			while ( debug.isSuspended() ) {
 				debug.resume();
+				LOGGER.info( "Resuming debug thread to reach method entry..." );
 			}
 		}
 
 		methodEntryRequest.enable();
+		LOGGER.info( "Method entry request enabled" );
 
 		var f = new CompletableFuture<ThreadReference>();
 
 		debugThreadAccessQueue.add( f );
 		return f;
+	}
+
+	public void stepThread( long threadId ) {
+		if ( stepRequests.containsKey( threadId ) ) {
+			var oldReq = stepRequests.remove( threadId );
+			oldReq.disable();
+			vm.eventRequestManager().deleteEventRequest( oldReq );
+		}
+
+		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
+
+		if ( thread.isEmpty() ) {
+			LOGGER.warning( "Cannot step thread - not found: " + threadId );
+			return;
+		}
+
+		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
+		    StepRequest.STEP_LINE,
+		    StepRequest.STEP_OVER );
+		stepRequest.addClassFilter( "boxgenerated.*" );
+		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		stepRequest.enable();
+		stepRequests.put( threadId, stepRequest );
+
+		continueExecution( ( int ) threadId );
 	}
 
 	public Optional<BreakpointContext> getBreakpointContext( int breakpointId ) {
@@ -185,6 +263,7 @@ public class BreakpointManager {
 		// Listen for all classes to catch BoxLang generated classes with any pattern
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
 		classPrepareRequest.enable();
+		// classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		LOGGER.info( "Set up class prepare events for all classes (to catch BoxLang generated classes)" );
 	}
 
@@ -268,6 +347,7 @@ public class BreakpointManager {
 		try {
 			EventRequestManager	requestManager		= vm.eventRequestManager();
 			BreakpointRequest	breakpointRequest	= requestManager.createBreakpointRequest( location );
+			breakpointRequest.setSuspendPolicy( BreakpointRequest.SUSPEND_EVENT_THREAD );
 
 			// Enable the breakpoint
 			breakpointRequest.enable();
@@ -346,12 +426,14 @@ public class BreakpointManager {
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
 
-					if ( event instanceof BreakpointEvent ) {
-						handleBreakpointEvent( ( BreakpointEvent ) event );
-					} else if ( event instanceof ClassPrepareEvent ) {
-						handleClassPrepareEvent( ( ClassPrepareEvent ) event );
-					} else if ( event instanceof MethodEntryEvent ) {
-						handleMethodEntryEvent( ( MethodEntryEvent ) event );
+					if ( event instanceof BreakpointEvent be ) {
+						handleBreakpointEvent( be );
+					} else if ( event instanceof StepEvent se ) {
+						handleStepEvent( se );
+					} else if ( event instanceof ClassPrepareEvent cpe ) {
+						handleClassPrepareEvent( cpe );
+					} else if ( event instanceof MethodEntryEvent mee ) {
+						handleMethodEntryEvent( mee );
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
 						eventProcessingActive = false;
@@ -365,7 +447,15 @@ public class BreakpointManager {
 				EventIterator	iter			= eventSet.eventIterator();
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
-					if ( evt instanceof BreakpointEvent || evt instanceof MethodEntryEvent ) {
+					if ( evt instanceof BreakpointEvent be ) {
+						eventSets.put( be.thread().uniqueID(), eventSet );
+						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
+						break;
+					} else if ( evt instanceof MethodEntryEvent mee ) {
+						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
+						break;
+					} else if ( evt instanceof StepEvent se ) {
+						eventSets.put( se.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					}
@@ -373,6 +463,12 @@ public class BreakpointManager {
 
 				if ( shouldResume ) {
 					eventSet.resume();
+				}
+
+				var helperThread = vm.allThreads().stream().filter( t -> t.name().equalsIgnoreCase( "DebuggerHelper-Worker" ) ).findFirst().get();
+
+				if ( helperThread.isSuspended() ) {
+					helperThread.resume();
 				}
 				// If shouldResume is false (breakpoint hit), the thread stays suspended
 				// until the debugger client sends a continue/step request
@@ -387,7 +483,7 @@ public class BreakpointManager {
 		}
 	}
 
-	private ThreadReference getDebugThread() {
+	public ThreadReference getDebugThread() {
 		for ( ThreadReference ref : vm.allThreads() ) {
 			if ( ref.name().equals( "bxDebugAgent" ) ) {
 				return ref;
@@ -398,18 +494,56 @@ public class BreakpointManager {
 	}
 
 	private void handleMethodEntryEvent( MethodEntryEvent event ) {
-		if ( !event.location().declaringType().name().equals( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" ) ) {
-			vm.resume();
+		var	className	= event.location().declaringType().name();
+		var	methodName	= event.location().method().name();
+
+		LOGGER.info( "Handling MethodEntryEvent for " + className + "." + methodName );
+
+		if ( className.equalsIgnoreCase( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
+			if ( !methodName.equals( "methodEntryBreakpointHook" ) ) {
+				event.thread().resume();
+				return;
+			}
+
+			LOGGER.fine( "DebuggerHelper.methodEntryBreakpoinHook invoked" );
+
+			if ( debugThread == null ) {
+				debugThread = event.thread();
+				this.methodEntryRequestDebugger.setEnabled( false );
+				this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+				LOGGER.info( "Completed debug thread future from method entry hook" );
+			}
+
+			if ( this.debugFuture != null ) {
+				this.methodEntryRequestDebugger.setEnabled( false );
+				this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+				this.debugFuture.complete( null );
+				this.debugFuture = null;
+				LOGGER.info( "Completed pause debug thread future from method entry hook" );
+			}
+
+			return;
+		}
+
+		if ( !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" )
+		    && !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
+			event.thread().resume();
+			return;
 		}
 
 		CompletableFuture<ThreadReference> f = debugThreadAccessQueue.poll();
 
 		if ( f == null ) {
 			LOGGER.warning( "No future available for method entry event" );
+			methodEntryRequest.setEnabled( debugThreadAccessQueue.size() > 0 );
+			event.thread().resume();
 			return;
 		}
 
-		methodEntryRequest.setEnabled( debugThreadAccessQueue.size() > 0 );
+		if ( debugThread != null ) {
+			methodEntryRequest.setEnabled( debugThreadAccessQueue.size() > 0 );
+			LOGGER.info( "Method entry request enabled: " + methodEntryRequest.isEnabled() );
+		}
 
 		f.complete( getDebugThread() );
 	}
@@ -426,10 +560,7 @@ public class BreakpointManager {
 			LOGGER.info( "Breakpoint hit at " + sourceName + ":" + lineNumber );
 
 			// this MUST happen before we respond to the client
-			breakPointContexts.put(
-			    Integer.valueOf( ( int ) event.request().getProperty( "breakPointId" ) ),
-			    new BreakpointContext( ( int ) event.request().getProperty( "breakPointId" ), event.thread() )
-			);
+			trackBreakpointContext( generateBreakpointId(), event.thread() );
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -446,6 +577,48 @@ public class BreakpointManager {
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );
 		}
+	}
+
+	private void handleStepEvent( StepEvent event ) {
+		try {
+			Location	location	= event.location();
+			String		sourceName	= getSourceName( location );
+			int			lineNumber	= location.lineNumber();
+
+			LOGGER.info( "Step completed at " + sourceName + ":" + lineNumber );
+
+			// Remove the step request as it is no longer needed
+			StepRequest stepRequest = stepRequests.remove( event.thread().uniqueID() );
+			if ( stepRequest != null ) {
+				vm.eventRequestManager().deleteEventRequest( stepRequest );
+			}
+
+			trackBreakpointContext( generateBreakpointId(), event.thread() );
+
+			// Send stopped event to the debug client
+			if ( client != null ) {
+				StoppedEventArguments stoppedArgs = new StoppedEventArguments();
+				stoppedArgs.setReason( "step" );
+				stoppedArgs.setDescription( "Paused after step" );
+				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
+
+				client.stopped( stoppedArgs );
+				LOGGER.info( "Sent stopped event to client after step" );
+			}
+
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error handling step event: " + e.getMessage() );
+		}
+	}
+
+	private void trackBreakpointContext( int breakpointId, ThreadReference thread ) {
+		for ( var entry : breakPointContexts.entrySet() ) {
+			if ( entry.getValue().getThreadReference().equals( thread ) ) {
+				breakPointContexts.remove( entry.getKey() );
+			}
+		}
+
+		breakPointContexts.put( breakpointId, new BreakpointContext( breakpointId, thread, this ) );
 	}
 
 	/**
@@ -750,6 +923,12 @@ public class BreakpointManager {
 		}
 
 		try {
+			if ( eventSets.containsKey( ( long ) threadId ) ) {
+				EventSet eventSet = eventSets.remove( ( long ) threadId );
+				eventSet.resume();
+				LOGGER.info( "Resumed thread " + threadId + " via stored event set" );
+				return;
+			}
 			// Find the thread by ID
 			ThreadReference targetThread = null;
 			for ( ThreadReference thread : vm.allThreads() ) {
@@ -798,7 +977,19 @@ public class BreakpointManager {
 
 	private void setupMethodEntryRequest() {
 		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequest.addClassFilter( "ortus.boxlang.*" );
+		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.*" );
+		this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" );
+		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
 		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		// this.methodEntryRequest.enable();
+		LOGGER.info( "Set up method entry request for DebugAgent" );
+
+		// create other debug thread request
+		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
+		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		this.methodEntryRequestDebugger.enable();
+		LOGGER.info( "Set up method entry request for DebugAgent" );
 	}
 }

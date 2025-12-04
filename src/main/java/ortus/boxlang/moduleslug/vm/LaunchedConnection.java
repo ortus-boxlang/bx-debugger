@@ -19,6 +19,7 @@ public class LaunchedConnection implements IVMConnection {
 
 	public LaunchedConnection( String program ) throws Exception {
 		this.vm = startupVM( program );
+		IVMConnection.loadDebugAgent( this );
 	}
 
 	@Override
@@ -56,7 +57,6 @@ public class LaunchedConnection implements IVMConnection {
 		while ( true ) {
 			try {
 				VirtualMachine vm = launchingConnector.launch( arguments );
-				IVMConnection.loadDebugAgent( this );
 
 				return vm;
 			} catch ( Exception launchEx ) {
