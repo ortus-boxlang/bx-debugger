@@ -256,6 +256,31 @@ public class VMController {
 		continueExecution( ( int ) threadId );
 	}
 
+	public void stepOutThread( long threadId ) {
+		if ( stepRequests.containsKey( threadId ) ) {
+			var oldReq = stepRequests.remove( threadId );
+			oldReq.disable();
+			vm.eventRequestManager().deleteEventRequest( oldReq );
+		}
+
+		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
+
+		if ( thread.isEmpty() ) {
+			LOGGER.warning( "Cannot step thread - not found: " + threadId );
+			return;
+		}
+
+		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
+		    StepRequest.STEP_LINE,
+		    StepRequest.STEP_OUT );
+		stepRequest.addClassFilter( "boxgenerated.*" );
+		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		stepRequest.enable();
+		stepRequests.put( threadId, stepRequest );
+
+		continueExecution( ( int ) threadId );
+	}
+
 	public Optional<BreakpointContext> getBreakpointContext( int breakpointId ) {
 		return Optional.ofNullable( breakPointContexts.get( breakpointId ) );
 	}

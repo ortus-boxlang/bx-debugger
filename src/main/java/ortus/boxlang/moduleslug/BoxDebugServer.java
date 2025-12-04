@@ -36,6 +36,7 @@ import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StackTraceArguments;
 import org.eclipse.lsp4j.debug.StackTraceResponse;
 import org.eclipse.lsp4j.debug.StepInArguments;
+import org.eclipse.lsp4j.debug.StepOutArguments;
 import org.eclipse.lsp4j.debug.TerminateArguments;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
 import org.eclipse.lsp4j.debug.VariablesArguments;
@@ -397,6 +398,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Perform step in for the specified thread
 			vmController.stepInThread( args.getThreadId() );
+
+			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
+			return null;
+		} );
+	}
+
+	public CompletableFuture<Void> stepOut( StepOutArguments args ) {
+
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Next request received for thread: " + args.getThreadId() );
+
+			if ( vmController == null ) {
+				LOGGER.warning( "BreakpointManager not available for Next request" );
+				return null;
+			}
+
+			// Perform step in for the specified thread
+			vmController.stepOutThread( args.getThreadId() );
 
 			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
 			return null;
