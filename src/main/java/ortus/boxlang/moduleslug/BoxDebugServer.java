@@ -35,6 +35,7 @@ import org.eclipse.lsp4j.debug.SourceResponse;
 import org.eclipse.lsp4j.debug.StackFrame;
 import org.eclipse.lsp4j.debug.StackTraceArguments;
 import org.eclipse.lsp4j.debug.StackTraceResponse;
+import org.eclipse.lsp4j.debug.TerminateArguments;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
 import org.eclipse.lsp4j.debug.VariablesArguments;
 import org.eclipse.lsp4j.debug.VariablesResponse;
@@ -411,6 +412,17 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				response.setTotalFrames( 0 );
 				return response;
 			}
+		} );
+	}
+
+	public CompletableFuture<Void> terminate( TerminateArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "Terminate request received from client" );
+
+			// Clean up the debugging session
+			handleTermination();
+
+			return null;
 		} );
 	}
 
