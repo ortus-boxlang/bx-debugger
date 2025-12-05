@@ -206,6 +206,32 @@ public class VMController {
 		return f;
 	}
 
+	public CompletableFuture<Value> evaluateExpressionInFrame( int frameId, String expression ) {
+		return getBreakpointContextbyStackFrame( frameId )
+		    .map( bpContext -> {
+			    try {
+
+				    ObjectReference context	= bpContext.getContext();
+				    ObjectReference runtime	= ( ObjectReference ) getRuntime().join();
+
+				    var			evalFuture	= InvokeTools.submitAndInvoke(
+				        this,
+				        runtime,
+				        "executeStatement",
+				        List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
+				        List.of( vm.mirrorOf( expression ), context )
+				    );
+
+				    return evalFuture;
+			    } catch ( Exception e ) {
+				    int i = 0;
+
+				    return null;
+			    }
+		    } )
+		    .orElseGet( () -> CompletableFuture.completedFuture( null ) );
+	}
+
 	public void stepThread( long threadId ) {
 		if ( stepRequests.containsKey( threadId ) ) {
 			var oldReq = stepRequests.remove( threadId );
@@ -312,8 +338,8 @@ public class VMController {
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
 		// Listen for all classes to catch BoxLang generated classes with any pattern
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
+		classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		classPrepareRequest.enable();
-		// classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		LOGGER.info( "Set up class prepare events for all classes (to catch BoxLang generated classes)" );
 	}
 
@@ -475,6 +501,8 @@ public class VMController {
 
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
+
+					LOGGER.fine( "Processing event: " + event.toString() );
 
 					if ( event instanceof BreakpointEvent be ) {
 						handleBreakpointEvent( be );
@@ -1041,5 +1069,15 @@ public class VMController {
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
 		LOGGER.info( "Set up method entry request for DebugAgent" );
+	}
+
+	private CompletableFuture<Value> getRuntime() {
+		return InvokeTools.submitAndInvokeStatic(
+		    this,
+		    "ortus.boxlang.runtime.BoxRuntime",
+		    "getInstance",
+		    new ArrayList<String>(),
+		    new ArrayList<Value>()
+		);
 	}
 }

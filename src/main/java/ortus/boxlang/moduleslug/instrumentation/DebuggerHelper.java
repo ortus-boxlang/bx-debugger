@@ -58,20 +58,20 @@ public final class DebuggerHelper {
 		workerThread = new Thread( () -> {
 			while ( !Thread.currentThread().isInterrupted() ) {
 				try {
-					System.out.println( "Starting queue" );
-					Task t = QUEUE.take();
-					System.out.println( "Found t - executing" );
-					Result r = executeTask( t );
+					// System.out.println( "Starting queue" );
+					Task	t	= QUEUE.take();
+					// System.out.println( "Found t - executing" );
+					Result	r	= executeTask( t );
 					if ( r != null ) {
-						System.out.println( "Got a result - storing in results: " + t.id );
+						// System.out.println( "Got a result - storing in results: " + t.id );
 						RESULTS.put( t.id, r );
 					}
 				} catch ( InterruptedException ie ) {
-					System.out.println( "Interrupted while waiting for task" );
+					// System.out.println( "Interrupted while waiting for task" );
 					Thread.currentThread().interrupt();
 					break;
 				} catch ( Throwable thr ) {
-					System.out.println( "Error in DebuggerHelper worker: " + thr.getMessage() );
+					// System.out.println( "Error in DebuggerHelper worker: " + thr.getMessage() );
 					// Protect worker from dying; record a global failure result if task present
 					// (shouldn't happen because executeTask handles task exceptions)
 				}
@@ -103,7 +103,7 @@ public final class DebuggerHelper {
 	}
 
 	public static void methodEntryBreakpointHook() {
-		System.out.println( "IN THE WORKERLOOP" );
+		// System.out.println( "IN THE WORKERLOOP" );
 	}
 
 	/**
@@ -164,13 +164,13 @@ public final class DebuggerHelper {
 	 * Poll result and remove it from the result map. Returns null if not ready.
 	 */
 	public static Result pollResult( String taskId ) {
-		System.out.println( "Polling result for taskId: " + taskId );
-		System.out.println( "RESULTS len: " + RESULTS.size() );
-		RESULTS.keySet().forEach( k -> System.out.println( "  key: " + k ) );
+		// System.out.println( "Polling result for taskId: " + taskId );
+		// System.out.println( "RESULTS len: " + RESULTS.size() );
+		// RESULTS.keySet().forEach( k -> System.out.println( " key: " + k ) );
 
 		var res = RESULTS.remove( taskId );
 
-		System.out.println( "Poll result found: " + ( res != null ? "yes" : "no" ) );
+		// System.out.println( "Poll result found: " + ( res != null ? "yes" : "no" ) );
 		return res;
 	}
 

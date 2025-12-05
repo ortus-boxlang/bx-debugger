@@ -206,7 +206,7 @@ public class VariableManager {
 		    && ctype.superclass().name().equalsIgnoreCase( type );
 	}
 
-	private Variable convertValueToVariable( String name, Value val ) {
+	public Variable convertValueToVariable( String name, Value val ) {
 		Variable var = new Variable();
 		var.setType( "null" );
 		var.setValue( "" );

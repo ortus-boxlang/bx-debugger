@@ -63,6 +63,9 @@ public class BreakpointContext {
 	}
 
 	public ObjectReference getContext() {
+		if ( context == null ) {
+			context = findContextForFrame( stackFrames.get( 0 ).jdiFrame() );
+		}
 		return context;
 	}
 

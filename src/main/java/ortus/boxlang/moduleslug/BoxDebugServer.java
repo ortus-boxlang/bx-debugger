@@ -39,6 +39,7 @@ import org.eclipse.lsp4j.debug.StepInArguments;
 import org.eclipse.lsp4j.debug.StepOutArguments;
 import org.eclipse.lsp4j.debug.TerminateArguments;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
+import org.eclipse.lsp4j.debug.Variable;
 import org.eclipse.lsp4j.debug.VariablesArguments;
 import org.eclipse.lsp4j.debug.VariablesResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
@@ -531,61 +532,20 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			LOGGER.info( "Evaluate request received. context=" + args.getContext() + ", expr=" + args.getExpression() );
 
 			EvaluateResponse	response	= new EvaluateResponse();
-			String				expr		= args.getExpression() != null ? args.getExpression().trim() : "";
-			String				context		= args.getContext() != null ? args.getContext().toLowerCase() : "repl";
 
-			try {
-				// Very small initial support:
-				// - string literals "..." -> return without quotes
-				// - otherwise, if not paused (no vm or no suspended threads), return error for hover/watch
-				// - in repl, if unsupported expression, return friendly error string
+			int					frameId		= args.getFrameId();
+			String				expr		= args.getExpression();
 
-				// Handle double-quoted string literal
-				if ( expr.startsWith( "\"" ) && expr.endsWith( "\"" ) && expr.length() >= 2 ) {
-					String value = expr.substring( 1, expr.length() - 1 );
-					response.setResult( value );
-					response.setVariablesReference( 0 );
-					return response;
-				}
+			this.vmController.evaluateExpressionInFrame( frameId, expr )
+			    .thenAccept( evalValue -> {
+				    Variable evalVariable = variableManager.convertValueToVariable( "result", evalValue );
 
-				boolean	isHoverOrWatch	= context.equals( "hover" ) || context.equals( "watch" );
+				    evalVariable.setVariablesReference( variableManager.put( evalValue ) );
 
-				// Determine if we are paused at a breakpoint (any suspended thread)
-				boolean	isPaused		= false;
-				try {
-					if ( vm != null ) {
-						isPaused = vm.allThreads().stream().anyMatch( t -> {
-							try {
-								return t.isSuspended();
-							} catch ( Exception e ) {
-								return false;
-							}
-						} );
-					}
-				} catch ( Exception e ) {
-					isPaused = false;
-				}
+				    response.setResult( evalVariable.getValue() );
+			    } ).join();
 
-				if ( isHoverOrWatch && !isPaused ) {
-					response.setResult( "Error: not paused; cannot evaluate in " + context + " context" );
-					response.setVariablesReference( 0 );
-					return response;
-				}
-
-				// Placeholder for future BoxLang expression evaluation in local context
-				// For now, return a simple error for non-literals
-				response.setResult( context.equals( "repl" )
-				    ? ( "Error: unsupported expression: " + expr )
-				    : ( "Error: unsupported expression in " + context + " context" ) );
-				response.setVariablesReference( 0 );
-				return response;
-
-			} catch ( Exception e ) {
-				LOGGER.severe( "Error handling evaluate request: " + e.getMessage() );
-				response.setResult( "Error: " + e.getMessage() );
-				response.setVariablesReference( 0 );
-				return response;
-			}
+			return response;
 		} );
 	}
 
