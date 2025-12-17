@@ -1,0 +1,15 @@
+// This is a script file for testing exception breakpoints
+// It throws a BoxRuntimeException that the debugger should catch
+
+function doSomething() {
+    // This will throw a BoxRuntimeException
+    throw( message="Test exception for debugger", type="TestException" );
+}
+
+try {
+    doSomething();
+} catch ( any e ) {
+    println( "Caught exception: " & e.message );
+}
+
+println( "Script completed" );

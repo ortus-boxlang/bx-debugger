@@ -36,6 +36,7 @@ import com.sun.jdi.event.Event;
 import com.sun.jdi.event.EventIterator;
 import com.sun.jdi.event.EventQueue;
 import com.sun.jdi.event.EventSet;
+import com.sun.jdi.event.ExceptionEvent;
 import com.sun.jdi.event.MethodEntryEvent;
 import com.sun.jdi.event.StepEvent;
 import com.sun.jdi.event.VMDeathEvent;
@@ -44,6 +45,7 @@ import com.sun.jdi.request.BreakpointRequest;
 import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
+import com.sun.jdi.request.ExceptionRequest;
 import com.sun.jdi.request.MethodEntryRequest;
 import com.sun.jdi.request.StepRequest;
 
@@ -76,6 +78,52 @@ public class VMController {
 	private MethodEntryRequest												methodEntryRequestDebugger	= null;
 	private CompletableFuture<Void>											debugFuture					= null;
 	private ThreadReference													debugThread					= null;
+
+	// Exception breakpoint support
+	private static final String												BOX_RUNTIME_EXCEPTION_CLASS	= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
+	private volatile boolean												exceptionBreakpointsEnabled	= false;
+	private ExceptionRequest												exceptionRequest			= null;
+	private final Map<Long, ExceptionInfo>									exceptionInfoByThread		= new ConcurrentHashMap<>();
+
+	/**
+	 * Information about an exception that caused a stop event
+	 */
+	public static class ExceptionInfo {
+
+		private final String	exceptionId;
+		private final String	description;
+		private final String	breakMode;
+		private final String	exceptionType;
+		private final String	exceptionMessage;
+
+		public ExceptionInfo( String exceptionId, String description, String breakMode, String exceptionType, String exceptionMessage ) {
+			this.exceptionId		= exceptionId;
+			this.description		= description;
+			this.breakMode			= breakMode;
+			this.exceptionType		= exceptionType;
+			this.exceptionMessage	= exceptionMessage;
+		}
+
+		public String getExceptionId() {
+			return exceptionId;
+		}
+
+		public String getDescription() {
+			return description;
+		}
+
+		public String getBreakMode() {
+			return breakMode;
+		}
+
+		public String getExceptionType() {
+			return exceptionType;
+		}
+
+		public String getExceptionMessage() {
+			return exceptionMessage;
+		}
+	}
 
 	/**
 	 * Represents a DAP breakpoint that has been requested but not yet verified
@@ -341,6 +389,117 @@ public class VMController {
 		classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		classPrepareRequest.enable();
 		LOGGER.info( "Set up class prepare events for all classes (to catch BoxLang generated classes)" );
+
+		// Also listen for BoxRuntimeException class loading (for deferred exception breakpoints)
+		ClassPrepareRequest exceptionClassPrepareRequest = requestManager.createClassPrepareRequest();
+		exceptionClassPrepareRequest.addClassFilter( BOX_RUNTIME_EXCEPTION_CLASS );
+		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		exceptionClassPrepareRequest.enable();
+		LOGGER.info( "Set up class prepare events for BoxRuntimeException" );
+	}
+
+	/**
+	 * Enable or disable exception breakpoints for BoxLang exceptions
+	 * 
+	 * @param enabled true to enable, false to disable
+	 */
+	public void setExceptionBreakpointsEnabled( boolean enabled ) {
+		this.exceptionBreakpointsEnabled = enabled;
+
+		if ( vm == null ) {
+			LOGGER.info( "VM not available, exception breakpoints will be set when VM is ready. Enabled=" + enabled );
+			return;
+		}
+
+		if ( enabled ) {
+			setupExceptionRequest();
+		} else {
+			clearExceptionRequest();
+		}
+	}
+
+	/**
+	 * Set up the JDI exception request for BoxRuntimeException
+	 */
+	private void setupExceptionRequest() {
+		if ( vm == null || exceptionRequest != null ) {
+			return;
+		}
+
+		// Try to find the BoxRuntimeException class if already loaded
+		ReferenceType exceptionClass = findExceptionClass();
+
+		if ( exceptionClass != null ) {
+			createExceptionRequest( exceptionClass );
+		} else {
+			LOGGER.info( "BoxRuntimeException class not yet loaded, will set exception request when class loads" );
+		}
+	}
+
+	/**
+	 * Find the BoxRuntimeException class in loaded classes
+	 */
+	private ReferenceType findExceptionClass() {
+		if ( vm == null ) {
+			return null;
+		}
+
+		for ( ReferenceType refType : vm.allClasses() ) {
+			if ( refType.name().equals( BOX_RUNTIME_EXCEPTION_CLASS ) ) {
+				return refType;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Create the JDI exception request for the given exception class
+	 */
+	private void createExceptionRequest( ReferenceType exceptionClass ) {
+		if ( vm == null || exceptionRequest != null ) {
+			return;
+		}
+
+		try {
+			EventRequestManager requestManager = vm.eventRequestManager();
+
+			// Create exception request for caught and uncaught BoxRuntimeException
+			exceptionRequest = requestManager.createExceptionRequest( exceptionClass, true, true );
+			exceptionRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+			exceptionRequest.enable();
+
+			LOGGER.info( "Created exception request for " + BOX_RUNTIME_EXCEPTION_CLASS );
+		} catch ( Exception e ) {
+			LOGGER.severe( "Failed to create exception request: " + e.getMessage() );
+		}
+	}
+
+	/**
+	 * Clear the exception request
+	 */
+	private void clearExceptionRequest() {
+		if ( exceptionRequest != null && vm != null ) {
+			try {
+				exceptionRequest.disable();
+				vm.eventRequestManager().deleteEventRequest( exceptionRequest );
+				LOGGER.info( "Cleared exception request" );
+			} catch ( Exception e ) {
+				LOGGER.warning( "Error clearing exception request: " + e.getMessage() );
+			}
+			exceptionRequest = null;
+		}
+		exceptionInfoByThread.clear();
+	}
+
+	/**
+	 * Get exception info for a thread that stopped due to an exception
+	 * 
+	 * @param threadId the thread ID
+	 * 
+	 * @return the ExceptionInfo or null if not available
+	 */
+	public ExceptionInfo getExceptionInfo( long threadId ) {
+		return exceptionInfoByThread.get( threadId );
 	}
 
 	/**
@@ -512,6 +671,8 @@ public class VMController {
 						handleClassPrepareEvent( cpe );
 					} else if ( event instanceof MethodEntryEvent mee ) {
 						handleMethodEntryEvent( mee );
+					} else if ( event instanceof ExceptionEvent ee ) {
+						handleExceptionEvent( ee );
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
 						eventProcessingActive = false;
@@ -535,6 +696,10 @@ public class VMController {
 					} else if ( evt instanceof StepEvent se ) {
 						eventSets.put( se.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
+						break;
+					} else if ( evt instanceof ExceptionEvent ee ) {
+						eventSets.put( ee.thread().uniqueID(), eventSet );
+						shouldResume = false; // Don't auto-resume on exception - wait for continue request
 						break;
 					}
 				}
@@ -689,6 +854,93 @@ public class VMController {
 		}
 	}
 
+	/**
+	 * Handle an exception event
+	 */
+	private void handleExceptionEvent( ExceptionEvent event ) {
+		try {
+			Location		location		= event.catchLocation() != null ? event.catchLocation() : event.location();
+			String			sourceName		= getSourceName( location );
+			int				lineNumber		= location.lineNumber();
+			ObjectReference	exceptionObj	= event.exception();
+			String			exceptionType	= exceptionObj.referenceType().name();
+
+			// Determine if this is a caught or uncaught exception
+			boolean			isCaught		= event.catchLocation() != null;
+			String			breakMode		= isCaught ? "always" : "unhandled";
+
+			LOGGER.info( "Exception hit: " + exceptionType + " at " + sourceName + ":" + lineNumber + " (caught=" + isCaught + ")" );
+
+			// Extract exception message if possible
+			String			exceptionMessage	= extractExceptionMessage( exceptionObj );
+
+			// Store exception info for this thread
+			ExceptionInfo	exceptionInfo		= new ExceptionInfo(
+			    exceptionType,
+			    exceptionMessage != null ? exceptionMessage : exceptionType,
+			    breakMode,
+			    exceptionType,
+			    exceptionMessage
+			);
+			exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
+
+			// Track the breakpoint context
+			trackBreakpointContext( generateBreakpointId(), event.thread() );
+
+			// Send stopped event to the debug client
+			if ( client != null ) {
+				StoppedEventArguments stoppedArgs = new StoppedEventArguments();
+				stoppedArgs.setReason( "exception" );
+				stoppedArgs.setDescription( "Paused on exception: " + exceptionType );
+				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
+				stoppedArgs.setText( exceptionMessage != null ? exceptionMessage : exceptionType );
+
+				client.stopped( stoppedArgs );
+				LOGGER.info( "Sent stopped event to client for exception" );
+			}
+
+		} catch ( Exception e ) {
+			LOGGER.severe( "Error handling exception event: " + e.getMessage() );
+		}
+	}
+
+	/**
+	 * Extract the exception message from the exception object
+	 */
+	private String extractExceptionMessage( ObjectReference exceptionObj ) {
+		try {
+			// Try to get the getMessage() result
+			com.sun.jdi.Method getMessageMethod = null;
+			for ( com.sun.jdi.Method m : exceptionObj.referenceType().methodsByName( "getMessage" ) ) {
+				try {
+					if ( m.argumentTypes().isEmpty() ) {
+						getMessageMethod = m;
+						break;
+					}
+				} catch ( com.sun.jdi.ClassNotLoadedException e ) {
+					// Skip methods with unloaded argument types
+					continue;
+				}
+			}
+
+			if ( getMessageMethod != null ) {
+				com.sun.jdi.Value result = exceptionObj.invokeMethod(
+				    exceptionObj.owningThread(),
+				    getMessageMethod,
+				    new ArrayList<>(),
+				    ObjectReference.INVOKE_SINGLE_THREADED
+				);
+
+				if ( result instanceof com.sun.jdi.StringReference ) {
+					return ( ( com.sun.jdi.StringReference ) result ).value();
+				}
+			}
+		} catch ( Exception e ) {
+			LOGGER.fine( "Could not extract exception message: " + e.getMessage() );
+		}
+		return null;
+	}
+
 	private void trackBreakpointContext( int breakpointId, ThreadReference thread ) {
 		for ( var entry : breakPointContexts.entrySet() ) {
 			if ( entry.getValue().getThreadReference().equals( thread ) ) {
@@ -705,6 +957,12 @@ public class VMController {
 	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
 		LOGGER.info( "Class loaded: " + refType.name() );
+
+		// Check if this is the BoxRuntimeException class and we have exception breakpoints enabled
+		if ( refType.name().equals( BOX_RUNTIME_EXCEPTION_CLASS ) && exceptionBreakpointsEnabled && exceptionRequest == null ) {
+			LOGGER.info( "BoxRuntimeException class loaded, setting up exception request" );
+			createExceptionRequest( refType );
+		}
 
 		// Check if this is a BoxLang generated class
 		if ( refType.name().toLowerCase().contains( "box" ) ||

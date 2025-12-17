@@ -20,6 +20,10 @@ import org.eclipse.lsp4j.debug.ContinueResponse;
 import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
 import org.eclipse.lsp4j.debug.EvaluateResponse;
+import org.eclipse.lsp4j.debug.ExceptionBreakMode;
+import org.eclipse.lsp4j.debug.ExceptionBreakpointsFilter;
+import org.eclipse.lsp4j.debug.ExceptionInfoArguments;
+import org.eclipse.lsp4j.debug.ExceptionInfoResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.NextArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
@@ -28,6 +32,8 @@ import org.eclipse.lsp4j.debug.ScopesArguments;
 import org.eclipse.lsp4j.debug.ScopesResponse;
 import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
 import org.eclipse.lsp4j.debug.SetBreakpointsResponse;
+import org.eclipse.lsp4j.debug.SetExceptionBreakpointsArguments;
+import org.eclipse.lsp4j.debug.SetExceptionBreakpointsResponse;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceArguments;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
@@ -107,9 +113,19 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsCompletionsRequest( false );
 		capabilities.setSupportsModulesRequest( false );
 		capabilities.setSupportsRestartRequest( false );
-		capabilities.setSupportsExceptionOptions( false );
+		capabilities.setSupportsExceptionOptions( true );
 		capabilities.setSupportsValueFormattingOptions( false );
-		capabilities.setSupportsExceptionInfoRequest( false );
+		capabilities.setSupportsExceptionInfoRequest( true );
+
+		// Set up exception breakpoint filters for BoxLang
+		ExceptionBreakpointsFilter boxlangExceptionFilter = new ExceptionBreakpointsFilter();
+		boxlangExceptionFilter.setFilter( "boxlang" );
+		boxlangExceptionFilter.setLabel( "BoxLang Exceptions" );
+		boxlangExceptionFilter.setDescription( "Break on caught or uncaught BoxLang runtime exceptions" );
+		boxlangExceptionFilter.setDefault_( false );
+		boxlangExceptionFilter.setSupportsCondition( false );
+
+		capabilities.setExceptionBreakpointFilters( new ExceptionBreakpointsFilter[] { boxlangExceptionFilter } );
 		capabilities.setSupportsDelayedStackTraceLoading( false );
 		capabilities.setSupportsLoadedSourcesRequest( false );
 		capabilities.setSupportsLogPoints( false );
@@ -364,6 +380,75 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
+
+			return response;
+		} );
+	}
+
+	@Override
+	public CompletableFuture<SetExceptionBreakpointsResponse> setExceptionBreakpoints( SetExceptionBreakpointsArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "SetExceptionBreakpoints request received" );
+
+			SetExceptionBreakpointsResponse response = new SetExceptionBreakpointsResponse();
+
+			// Initialize VM controller if not yet available (before launch)
+			if ( vmController == null ) {
+				vmController = new VMController( null, client );
+				LOGGER.info( "Created temporary VMController for exception breakpoints" );
+			}
+
+			// Check if "boxlang" filter is enabled
+			String[]	filters						= args.getFilters();
+			boolean		boxlangExceptionsEnabled	= false;
+
+			if ( filters != null ) {
+				for ( String filter : filters ) {
+					if ( "boxlang".equals( filter ) ) {
+						boxlangExceptionsEnabled = true;
+						break;
+					}
+				}
+			}
+
+			// Configure exception breakpoints in VMController
+			vmController.setExceptionBreakpointsEnabled( boxlangExceptionsEnabled );
+
+			LOGGER.info( "Exception breakpoints configured: boxlang=" + boxlangExceptionsEnabled );
+
+			return response;
+		} );
+	}
+
+	@Override
+	public CompletableFuture<ExceptionInfoResponse> exceptionInfo( ExceptionInfoArguments args ) {
+		return CompletableFuture.supplyAsync( () -> {
+			LOGGER.info( "ExceptionInfo request received for thread: " + args.getThreadId() );
+
+			ExceptionInfoResponse response = new ExceptionInfoResponse();
+
+			if ( vmController == null ) {
+				LOGGER.warning( "VMController not available for exceptionInfo request" );
+				response.setExceptionId( "unknown" );
+				response.setDescription( "No exception information available" );
+				return response;
+			}
+
+			// Get exception info from the VMController
+			VMController.ExceptionInfo exceptionInfo = vmController.getExceptionInfo( args.getThreadId() );
+
+			if ( exceptionInfo != null ) {
+				response.setExceptionId( exceptionInfo.getExceptionId() );
+				response.setDescription( exceptionInfo.getDescription() );
+				// Convert string break mode to enum
+				ExceptionBreakMode breakMode = "unhandled".equals( exceptionInfo.getBreakMode() )
+				    ? ExceptionBreakMode.UNHANDLED
+				    : ExceptionBreakMode.ALWAYS;
+				response.setBreakMode( breakMode );
+			} else {
+				response.setExceptionId( "unknown" );
+				response.setDescription( "No exception information available" );
+			}
 
 			return response;
 		} );
