@@ -13,9 +13,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
+import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.StackFrame;
@@ -23,6 +26,7 @@ import org.eclipse.lsp4j.debug.StoppedEventArguments;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 
 import com.sun.jdi.AbsentInformationException;
+import com.sun.jdi.ClassType;
 import com.sun.jdi.IncompatibleThreadStateException;
 import com.sun.jdi.Location;
 import com.sun.jdi.ObjectReference;
@@ -54,36 +58,42 @@ import com.sun.jdi.request.StepRequest;
  */
 public class VMController {
 
-	private static final Logger												LOGGER						= Logger.getLogger( VMController.class.getName() );
+	private static final Logger												LOGGER							= Logger.getLogger( VMController.class.getName() );
 
 	public final VirtualMachine												vm;
 	private final IDebugProtocolClient										client;
-	private final List<BreakpointRequest>									activeBreakpoints			= new CopyOnWriteArrayList<>();
-	private final List<PendingBreakpointInfo>								pendingBreakpoints			= new CopyOnWriteArrayList<>();
-	private volatile boolean												eventProcessingActive		= false;
+	private final List<BreakpointRequest>									activeBreakpoints				= new CopyOnWriteArrayList<>();
+	private final List<PendingBreakpointInfo>								pendingBreakpoints				= new CopyOnWriteArrayList<>();
+	private volatile boolean												eventProcessingActive			= false;
 	private Thread															eventProcessingThread;
 
 	// DAP-level breakpoint storage - organized by file path
-	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile	= new ConcurrentHashMap<>();
-	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById		= new ConcurrentHashMap<>();
-	private int																breakpointIdCounter			= 1;
+	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile		= new ConcurrentHashMap<>();
+	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById			= new ConcurrentHashMap<>();
+	private int																breakpointIdCounter				= 1;
 
-	private final Map<Integer, BreakpointContext>							breakPointContexts			= new WeakHashMap<>();
+	private final Map<Integer, BreakpointContext>							breakPointContexts				= new WeakHashMap<>();
 
-	private MethodEntryRequest												methodEntryRequest			= null;
-	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue		= new ConcurrentLinkedQueue<>();
-	private Map<Long, StepRequest>											stepRequests				= new ConcurrentHashMap<>();
-	private Map<Long, EventSet>												eventSets					= new ConcurrentHashMap<>();
+	private MethodEntryRequest												methodEntryRequest				= null;
+	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue			= new ConcurrentLinkedQueue<>();
+	private Map<Long, StepRequest>											stepRequests					= new ConcurrentHashMap<>();
+	private Map<Long, EventSet>												eventSets						= new ConcurrentHashMap<>();
 
-	private MethodEntryRequest												methodEntryRequestDebugger	= null;
-	private CompletableFuture<Void>											debugFuture					= null;
-	private ThreadReference													debugThread					= null;
+	private MethodEntryRequest												methodEntryRequestDebugger		= null;
+	private CompletableFuture<Void>											debugFuture						= null;
+	private ThreadReference													debugThread						= null;
 
 	// Exception breakpoint support
-	private static final String												BOX_RUNTIME_EXCEPTION_CLASS	= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
-	private volatile boolean												exceptionBreakpointsEnabled	= false;
-	private ExceptionRequest												exceptionRequest			= null;
-	private final Map<Long, ExceptionInfo>									exceptionInfoByThread		= new ConcurrentHashMap<>();
+	private static final String												BOX_RUNTIME_EXCEPTION_CLASS		= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
+	private volatile boolean												exceptionBreakpointsEnabled		= false;
+	private ExceptionRequest												exceptionRequest				= null;
+	private final Map<Long, ExceptionInfo>									exceptionInfoByThread			= new ConcurrentHashMap<>();
+
+	// Conditional breakpoint support
+	private static final int												CONDITION_EVAL_TIMEOUT_SECONDS	= 30;
+	private final Map<Integer, Integer>										breakpointHitCounts				= new ConcurrentHashMap<>();
+
+	private CompletableFuture<Value>										runtimeFuture					= null;
 
 	/**
 	 * Information about an exception that caused a stop event
@@ -177,11 +187,21 @@ public class VMController {
 		final String	filePath;
 		final int		lineNumber;
 		final int		breakpointId;
+		final String	condition;
+		final String	hitCondition;
+		final String	logMessage;
 
 		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId ) {
+			this( filePath, lineNumber, breakpointId, null, null, null );
+		}
+
+		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId, String condition, String hitCondition, String logMessage ) {
 			this.filePath		= filePath;
 			this.lineNumber		= lineNumber;
 			this.breakpointId	= breakpointId;
+			this.condition		= condition;
+			this.hitCondition	= hitCondition;
+			this.logMessage		= logMessage;
 		}
 	}
 
@@ -234,6 +254,27 @@ public class VMController {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Ensure the DebuggerHelper threads are ready for condition evaluation.
+	 * The worker thread needs to be running to process queued tasks.
+	 */
+	private void ensureDebugHelperThreadsReady() {
+		try {
+			// Resume the worker thread if suspended - it processes the queue
+			vm.allThreads().stream()
+			    .filter( t -> t.name().equalsIgnoreCase( "DebuggerHelper-Worker" ) )
+			    .findFirst()
+			    .ifPresent( workerThread -> {
+				    if ( workerThread.isSuspended() ) {
+					    workerThread.resume();
+					    LOGGER.fine( "Resumed DebuggerHelper-Worker thread for condition evaluation" );
+				    }
+			    } );
+		} catch ( Exception e ) {
+			LOGGER.warning( "Error ensuring debug helper threads ready: " + e.getMessage() );
+		}
 	}
 
 	public CompletableFuture<ThreadReference> getSuspendedDebugThread() {
@@ -506,25 +547,30 @@ public class VMController {
 	 * Set a breakpoint at the specified file and line
 	 */
 	public boolean setBreakpoint( PendingBreakpoint pending ) {
-		String	filePath	= pending.getFilePath();
-		int		lineNumber	= pending.getSourceBreakpoint().getLine();
+		String				filePath		= pending.getFilePath();
+		int					lineNumber		= pending.getSourceBreakpoint().getLine();
+		SourceBreakpoint	srcBp			= pending.getSourceBreakpoint();
+		String				condition		= srcBp.getCondition();
+		String				hitCondition	= srcBp.getHitCondition();
+		String				logMessage		= srcBp.getLogMessage();
+
 		try {
 			LOGGER.info( "Attempting to set breakpoint at " + filePath + ":" + lineNumber );
 
 			// If VM is not available, just add to pending breakpoints
 			if ( vm == null ) {
-				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.breakpoint.getId() ) );
+				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.breakpoint.getId(), condition, hitCondition, logMessage ) );
 				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
 				return true;
 			}
 
 			// Try to set the breakpoint immediately if the class is already loaded
-			if ( trySetBreakpointOnLoadedClass( pending.getBreakpoint().getId(), filePath, lineNumber ) ) {
+			if ( trySetBreakpointOnLoadedClass( pending.getBreakpoint().getId(), filePath, lineNumber, condition, hitCondition, logMessage ) ) {
 				return true;
 			}
 
 			// If not successful, add to pending breakpoints
-			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.getBreakpoint().getId() ) );
+			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, pending.getBreakpoint().getId(), condition, hitCondition, logMessage ) );
 			LOGGER.info( "Added breakpoint to pending list: " + filePath + ":" + lineNumber );
 			return true; // Return true since we'll set it when the class loads
 
@@ -537,8 +583,18 @@ public class VMController {
 
 	/**
 	 * Try to set a breakpoint on an already loaded class
+	 * 
+	 * @param breakpointId unique ID for this breakpoint
+	 * @param filePath     source file path
+	 * @param lineNumber   line number in source
+	 * @param condition    optional condition expression (may be null)
+	 * @param hitCondition optional hit count condition (may be null)
+	 * @param logMessage   optional log message for logpoints (may be null)
+	 * 
+	 * @return true if breakpoint was set on a loaded class
 	 */
-	private boolean trySetBreakpointOnLoadedClass( int breakpointId, String filePath, int lineNumber ) {
+	private boolean trySetBreakpointOnLoadedClass( int breakpointId, String filePath, int lineNumber,
+	    String condition, String hitCondition, String logMessage ) {
 		// Require VM to be available
 		if ( vm == null ) {
 			return false;
@@ -561,7 +617,7 @@ public class VMController {
 
 					// More flexible matching: check if the class name matches what we expect
 					if ( sourceName != null && sourceName.equalsIgnoreCase( filePath ) ) {
-						return createBreakpointRequest( breakpointId, location, filePath, lineNumber );
+						return createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
 					}
 				}
 			} catch ( AbsentInformationException e ) {
@@ -577,19 +633,41 @@ public class VMController {
 
 	/**
 	 * Create a breakpoint request for the given location
+	 * 
+	 * @param breakpointId unique ID for this breakpoint
+	 * @param location     JDI location for the breakpoint
+	 * @param filePath     source file path
+	 * @param lineNumber   line number in source
+	 * @param condition    optional condition expression (may be null)
+	 * @param hitCondition optional hit count condition (may be null)
+	 * @param logMessage   optional log message for logpoints (may be null)
+	 * 
+	 * @return true if breakpoint was created successfully
 	 */
-	private boolean createBreakpointRequest( int breakpointId, Location location, String filePath, int lineNumber ) {
+	private boolean createBreakpointRequest( int breakpointId, Location location, String filePath, int lineNumber,
+	    String condition, String hitCondition, String logMessage ) {
 		try {
 			EventRequestManager	requestManager		= vm.eventRequestManager();
 			BreakpointRequest	breakpointRequest	= requestManager.createBreakpointRequest( location );
 			breakpointRequest.setSuspendPolicy( BreakpointRequest.SUSPEND_EVENT_THREAD );
 
+			// Store breakpoint properties
+			breakpointRequest.putProperty( "breakPointId", breakpointId );
+			breakpointRequest.putProperty( "condition", condition );
+			breakpointRequest.putProperty( "hitCondition", hitCondition );
+			breakpointRequest.putProperty( "logMessage", logMessage );
+
+			// Initialize hit count for this breakpoint
+			breakpointHitCounts.put( breakpointId, 0 );
+
 			// Enable the breakpoint
 			breakpointRequest.enable();
 			activeBreakpoints.add( breakpointRequest );
-			breakpointRequest.putProperty( "breakPointId", breakpointId );
 
-			LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
+			LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber +
+			    ( condition != null ? " [condition: " + condition + "]" : "" ) +
+			    ( hitCondition != null ? " [hitCondition: " + hitCondition + "]" : "" ) +
+			    ( logMessage != null ? " [logMessage: " + logMessage + "]" : "" ) );
 			return true;
 
 		} catch ( Exception e ) {
@@ -796,14 +874,55 @@ public class VMController {
 	 */
 	private void handleBreakpointEvent( BreakpointEvent event ) {
 		try {
-			Location	location	= event.location();
-			String		sourceName	= getSourceName( location );
-			int			lineNumber	= location.lineNumber();
+			// Ensure helper threads are available for condition evaluation
+			// The worker thread processes tasks, the invoker thread is used for JDI invocations
+			// ensureDebugHelperThreadsReady();
+
+			Location			location		= event.location();
+			String				sourceName		= getSourceName( location );
+			int					lineNumber		= location.lineNumber();
+			BreakpointRequest	request			= ( BreakpointRequest ) event.request();
+			Integer				breakpointId	= ( Integer ) request.getProperty( "breakPointId" );
+			String				condition		= ( String ) request.getProperty( "condition" );
+			String				hitCondition	= ( String ) request.getProperty( "hitCondition" );
+			String				logMessage		= ( String ) request.getProperty( "logMessage" );
 
 			LOGGER.info( "Breakpoint hit at " + sourceName + ":" + lineNumber );
 
-			// this MUST happen before we respond to the client
-			trackBreakpointContext( generateBreakpointId(), event.thread() );
+			// Update hit count
+			int hitCount = breakpointHitCounts.getOrDefault( breakpointId, 0 ) + 1;
+			breakpointHitCounts.put( breakpointId, hitCount );
+
+			// Track context for expression evaluation (needed before condition check)
+			int contextId = generateBreakpointId();
+			trackBreakpointContext( contextId, event.thread() );
+
+			// Check hit condition if specified
+			if ( hitCondition != null && !hitCondition.isEmpty() ) {
+				if ( !checkHitCondition( hitCondition, hitCount ) ) {
+					LOGGER.info( "Hit condition not met: " + hitCondition + " (hit count: " + hitCount + ")" );
+					event.thread().resume();
+					return;
+				}
+			}
+
+			// Check condition if specified
+			if ( condition != null && !condition.isEmpty() ) {
+				if ( !evaluateCondition( contextId, condition ) ) {
+					LOGGER.info( "Condition evaluated to false: " + condition );
+					event.thread().resume();
+					return;
+				}
+			}
+
+			// Handle log point - send output and resume
+			if ( logMessage != null && !logMessage.isEmpty() ) {
+				String expandedMessage = expandLogMessage( contextId, logMessage, hitCount );
+				sendLogOutput( expandedMessage, sourceName, lineNumber );
+				LOGGER.info( "Logpoint: " + expandedMessage );
+				event.thread().resume();
+				return;
+			}
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -811,7 +930,7 @@ public class VMController {
 				stoppedArgs.setReason( "breakpoint" );
 				stoppedArgs.setDescription( "Paused on breakpoint" );
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
-				stoppedArgs.setHitBreakpointIds( new Integer[] { ( int ) event.request().getProperty( "breakPointId" ) } );
+				stoppedArgs.setHitBreakpointIds( new Integer[] { breakpointId } );
 
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
@@ -819,6 +938,259 @@ public class VMController {
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );
+		}
+	}
+
+	/**
+	 * Check if the hit condition is satisfied
+	 * Supports: N (equals), >N, >=N, <N, <=N, %N (every Nth hit)
+	 */
+	private boolean checkHitCondition( String hitCondition, int hitCount ) {
+		try {
+			String trimmed = hitCondition.trim();
+
+			if ( trimmed.startsWith( ">=" ) ) {
+				int threshold = Integer.parseInt( trimmed.substring( 2 ).trim() );
+				return hitCount >= threshold;
+			} else if ( trimmed.startsWith( "<=" ) ) {
+				int threshold = Integer.parseInt( trimmed.substring( 2 ).trim() );
+				return hitCount <= threshold;
+			} else if ( trimmed.startsWith( ">" ) ) {
+				int threshold = Integer.parseInt( trimmed.substring( 1 ).trim() );
+				return hitCount > threshold;
+			} else if ( trimmed.startsWith( "<" ) ) {
+				int threshold = Integer.parseInt( trimmed.substring( 1 ).trim() );
+				return hitCount < threshold;
+			} else if ( trimmed.startsWith( "%" ) ) {
+				int modulo = Integer.parseInt( trimmed.substring( 1 ).trim() );
+				return modulo > 0 && hitCount % modulo == 0;
+			} else {
+				// Plain number means equals
+				int threshold = Integer.parseInt( trimmed );
+				return hitCount == threshold;
+			}
+		} catch ( NumberFormatException e ) {
+			LOGGER.warning( "Invalid hit condition format: " + hitCondition );
+			return true; // Default to stopping on error
+		}
+	}
+
+	/**
+	 * Evaluate a condition expression in the current breakpoint context
+	 * Returns true if the condition is truthy, false otherwise
+	 */
+	private boolean evaluateCondition( int contextId, String condition ) {
+		try {
+			Optional<BreakpointContext> bpContextOpt = getBreakpointContext( contextId );
+			if ( bpContextOpt.isEmpty() ) {
+				LOGGER.warning( "No breakpoint context found for condition evaluation" );
+				return true; // Default to stopping if we can't evaluate
+			}
+
+			BreakpointContext	bpContext	= bpContextOpt.get();
+			ObjectReference		context		= bpContext.getContext();
+
+			if ( context == null ) {
+				LOGGER.warning( "No IBoxContext found for condition evaluation" );
+				return true;
+			}
+
+			ObjectReference runtime = ( ObjectReference ) getRuntime().get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
+			if ( runtime == null ) {
+				LOGGER.warning( "Could not get runtime for condition evaluation" );
+				return true;
+			}
+
+			CompletableFuture<Value>	evalFuture	= InvokeTools.submitAndInvoke(
+			    this,
+			    runtime,
+			    "executeStatement",
+			    List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
+			    List.of( vm.mirrorOf( condition ), context )
+			);
+
+			Value						result		= evalFuture.get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
+			return isTruthy( result );
+
+		} catch ( TimeoutException e ) {
+			LOGGER.warning( "Condition evaluation timed out after " + CONDITION_EVAL_TIMEOUT_SECONDS + " seconds: " + condition );
+			return true; // Default to stopping on timeout
+		} catch ( Exception e ) {
+			LOGGER.warning( "Error evaluating condition: " + e.getMessage() );
+			return true; // Default to stopping on error
+		}
+	}
+
+	/**
+	 * Determine if a JDI Value is truthy
+	 */
+	private boolean isTruthy( Value value ) {
+		if ( value == null ) {
+			return false;
+		}
+
+		// Handle BooleanValue
+		if ( value instanceof com.sun.jdi.BooleanValue ) {
+			return ( ( com.sun.jdi.BooleanValue ) value ).value();
+		}
+
+		// Handle numeric types - non-zero is truthy
+		if ( value instanceof com.sun.jdi.PrimitiveValue ) {
+			if ( value instanceof com.sun.jdi.IntegerValue ) {
+				return ( ( com.sun.jdi.IntegerValue ) value ).value() != 0;
+			} else if ( value instanceof com.sun.jdi.LongValue ) {
+				return ( ( com.sun.jdi.LongValue ) value ).value() != 0;
+			} else if ( value instanceof com.sun.jdi.DoubleValue ) {
+				return ( ( com.sun.jdi.DoubleValue ) value ).value() != 0.0;
+			} else if ( value instanceof com.sun.jdi.FloatValue ) {
+				return ( ( com.sun.jdi.FloatValue ) value ).value() != 0.0f;
+			}
+		}
+
+		// Handle StringReference - non-empty is truthy
+		if ( value instanceof com.sun.jdi.StringReference ) {
+			String strValue = ( ( com.sun.jdi.StringReference ) value ).value();
+			return strValue != null && !strValue.isEmpty() && !strValue.equalsIgnoreCase( "false" );
+		}
+
+		// Handle ObjectReference - non-null is truthy
+		if ( value instanceof ObjectReference ) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Expand a log message by replacing {expression} placeholders with evaluated values
+	 */
+	private String expandLogMessage( int contextId, String logMessage, int hitCount ) {
+		// Replace special placeholders
+		String			expanded	= logMessage.replace( "{hitCount}", String.valueOf( hitCount ) );
+
+		// Find and evaluate {expression} placeholders
+		StringBuilder	result		= new StringBuilder();
+		int				i			= 0;
+		while ( i < expanded.length() ) {
+			if ( expanded.charAt( i ) == '{' ) {
+				int end = expanded.indexOf( '}', i );
+				if ( end > i ) {
+					String expression = expanded.substring( i + 1, end );
+					if ( !expression.equals( "hitCount" ) ) { // Already handled
+						String value = evaluateExpressionForLog( contextId, expression );
+						result.append( value );
+					} else {
+						result.append( String.valueOf( hitCount ) );
+					}
+					i = end + 1;
+					continue;
+				}
+			}
+			result.append( expanded.charAt( i ) );
+			i++;
+		}
+
+		return result.toString();
+	}
+
+	/**
+	 * Evaluate an expression for log message expansion
+	 */
+	private String evaluateExpressionForLog( int contextId, String expression ) {
+		try {
+			Optional<BreakpointContext> bpContextOpt = getBreakpointContext( contextId );
+			if ( bpContextOpt.isEmpty() ) {
+				return "<no context>";
+			}
+
+			BreakpointContext	bpContext	= bpContextOpt.get();
+			ObjectReference		context		= bpContext.getContext();
+
+			if ( context == null ) {
+				return "<no context>";
+			}
+
+			ObjectReference runtime = ( ObjectReference ) getRuntime().get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
+			if ( runtime == null ) {
+				return "<error>";
+			}
+
+			CompletableFuture<Value>	evalFuture	= InvokeTools.submitAndInvoke(
+			    this,
+			    runtime,
+			    "executeStatement",
+			    List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
+			    List.of( vm.mirrorOf( expression ), context )
+			);
+
+			Value						result		= evalFuture.get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
+			return valueToString( result );
+
+		} catch ( Exception e ) {
+			return "<error: " + e.getMessage() + ">";
+		}
+	}
+
+	/**
+	 * Convert a JDI Value to a string representation
+	 */
+	private String valueToString( Value value ) {
+		if ( value == null ) {
+			return "null";
+		}
+
+		if ( value instanceof com.sun.jdi.StringReference ) {
+			return ( ( com.sun.jdi.StringReference ) value ).value();
+		}
+
+		if ( value instanceof com.sun.jdi.PrimitiveValue ) {
+			return value.toString();
+		}
+
+		if ( value instanceof ObjectReference ) {
+			ObjectReference objRef = ( ObjectReference ) value;
+			// Try to invoke toString()
+			try {
+				ClassType	classType		= ( ClassType ) objRef.referenceType();
+				var			toStringMethod	= classType.methodsByName( "toString" ).stream()
+				    .filter( m -> m.argumentTypeNames().isEmpty() )
+				    .findFirst();
+
+				if ( toStringMethod.isPresent() ) {
+					CompletableFuture<Value>	future	= InvokeTools.submitAndInvoke(
+					    this, objRef, "toString", List.of(), List.of()
+					);
+					Value						strVal	= future.get( 2, TimeUnit.SECONDS );
+					if ( strVal instanceof com.sun.jdi.StringReference ) {
+						return ( ( com.sun.jdi.StringReference ) strVal ).value();
+					}
+				}
+			} catch ( Exception e ) {
+				// Fall through to default
+			}
+			return objRef.referenceType().name() + "@" + objRef.uniqueID();
+		}
+
+		return value.toString();
+	}
+
+	/**
+	 * Send a log output event to the debug client
+	 */
+	private void sendLogOutput( String message, String sourceName, int lineNumber ) {
+		if ( client != null ) {
+			OutputEventArguments outputArgs = new OutputEventArguments();
+			outputArgs.setCategory( "console" );
+			outputArgs.setOutput( message + "\n" );
+
+			if ( sourceName != null ) {
+				Source source = new Source();
+				source.setPath( sourceName );
+				outputArgs.setSource( source );
+				outputArgs.setLine( lineNumber );
+			}
+
+			client.output( outputArgs );
 		}
 	}
 
@@ -975,7 +1347,8 @@ public class VMController {
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
 
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber ) ) {
+			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber,
+			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
 				toRemove.add( pending );
 				LOGGER.fine( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
 			}
@@ -1330,6 +1703,7 @@ public class VMController {
 	}
 
 	private CompletableFuture<Value> getRuntime() {
+
 		return InvokeTools.submitAndInvokeStatic(
 		    this,
 		    "ortus.boxlang.runtime.BoxRuntime",
@@ -1338,4 +1712,26 @@ public class VMController {
 		    new ArrayList<Value>()
 		);
 	}
+
+	// private CompletableFuture<Value> getRuntime() {
+
+	// if ( runtimeFuture == null ) {
+	// runtimeFuture = CompletableFuture.supplyAsync( () -> {
+	// try {
+	// return InvokeTools.submitAndInvokeStatic(
+	// this,
+	// "ortus.boxlang.runtime.BoxRuntime",
+	// "getInstance",
+	// new ArrayList<String>(),
+	// new ArrayList<Value>()
+	// ).get();
+	// } catch ( Exception e ) {
+	// LOGGER.severe( "Error getting BoxRuntime instance: " + e.getMessage() );
+	// return null;
+	// }
+	// } );
+	// }
+
+	// return runtimeFuture;
+	// }
 }

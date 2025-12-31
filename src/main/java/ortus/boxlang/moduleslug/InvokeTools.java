@@ -68,9 +68,13 @@ public class InvokeTools {
 			synchronized ( invokeLock ) {
 				try {
 					String taskId = enqueueStatic( vmController, target, methodName, paramTypeNames, args );
+					if ( taskId == null ) {
+						LOGGER.severe( "Failed to enqueue static invocation: " + target + "." + methodName );
+						return null;
+					}
 					return pollForResult( vmController, taskId );
 				} catch ( Exception e ) {
-					LOGGER.severe( "Error during submitAndInvoke: " + e.getMessage() );
+					LOGGER.severe( "Error during submitAndInvokeStatic: " + e.getMessage() );
 				}
 
 				return null;
@@ -85,6 +89,10 @@ public class InvokeTools {
 			synchronized ( invokeLock ) {
 				try {
 					String taskId = enqueueOnObject( vmController, target, methodName, paramTypeNames, args );
+					if ( taskId == null ) {
+						LOGGER.severe( "Failed to enqueue invocation: " + methodName );
+						return null;
+					}
 					return pollForResult( vmController, taskId );
 				} catch ( Exception e ) {
 					LOGGER.severe( "Error during submitAndInvoke: " + e.getMessage() );
@@ -97,6 +105,16 @@ public class InvokeTools {
 
 	private static Value pollForResult( VMController vmController, String taskId ) {
 		ClassType helperClass = getHelperClass( vmController );
+		if ( helperClass == null ) {
+			LOGGER.severe( "DebuggerHelper class not found" );
+			return null;
+		}
+
+		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
+		if ( debugThread == null ) {
+			LOGGER.severe( "Debug thread not available for pollForResult" );
+			return null;
+		}
 
 		try {
 			int		timeoutLoop	= 100;
@@ -104,7 +122,7 @@ public class InvokeTools {
 			Method	pollMethod	= helperClass.methodsByName( "pollResult" ).get( 0 );
 			Value	res			= null;
 			for ( int i = 0; i < timeoutLoop; ++i ) {
-				res = helperClass.invokeMethod( vmController.getPreparedDebugInvokeThread(), pollMethod,
+				res = helperClass.invokeMethod( debugThread, pollMethod,
 				    Collections.singletonList( vmController.vm.mirrorOf( taskId ) ),
 				    ObjectReference.INVOKE_SINGLE_THREADED );
 				if ( res != null ) {
@@ -112,6 +130,7 @@ public class InvokeTools {
 				}
 				Thread.sleep( 50 );
 			}
+			LOGGER.warning( "pollForResult timed out after " + ( timeoutLoop * 50 ) + "ms for taskId: " + taskId );
 		} catch ( InvalidTypeException e ) {
 			LOGGER.severe( "Invalid type during pollForResult: " + e.getMessage() );
 		} catch ( ClassNotLoadedException e ) {
@@ -127,14 +146,25 @@ public class InvokeTools {
 	}
 
 	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
-		ClassType	helperClass	= getHelperClass( vmController );
-		List<Value>	taskArgs	= List.of( vmController.vm.mirrorOf( target ), vmController.vm.mirrorOf( methodName ),
+		ClassType helperClass = getHelperClass( vmController );
+		if ( helperClass == null ) {
+			LOGGER.severe( "DebuggerHelper class not found for enqueueStatic" );
+			return null;
+		}
+
+		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
+		if ( debugThread == null ) {
+			LOGGER.severe( "Debug thread not available for enqueueStatic" );
+			return null;
+		}
+
+		List<Value> taskArgs = List.of( vmController.vm.mirrorOf( target ), vmController.vm.mirrorOf( methodName ),
 		    convertToMirrorStringArray( vmController, paramTypeNames ),
 		    convertToMirrorObjectArray( vmController, args ) );
 
 		try {
 			Value taskIdVal = helperClass.invokeMethod(
-			    vmController.getPreparedDebugInvokeThread(),
+			    debugThread,
 			    helperClass.methodsByName( "enqueueStatic" ).get( 0 ),
 			    taskArgs,
 			    ObjectReference.INVOKE_SINGLE_THREADED
@@ -142,13 +172,13 @@ public class InvokeTools {
 
 			return ( ( StringReference ) taskIdVal ).value();
 		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during enqueueOnObject: " + e.getMessage() );
+			LOGGER.severe( "Invalid type during enqueueStatic: " + e.getMessage() );
 		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during enqueueOnObject: " + e.getMessage() );
+			LOGGER.severe( "Class not loaded during enqueueStatic: " + e.getMessage() );
 		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during enqueueOnObject: " + e.getMessage() );
+			LOGGER.severe( "Incompatible thread state during enqueueStatic: " + e.getMessage() );
 		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during enqueueOnObject: " + e.getMessage() );
+			LOGGER.severe( "Invocation exception during enqueueStatic: " + e.getMessage() );
 		}
 
 		return null;
@@ -156,13 +186,24 @@ public class InvokeTools {
 
 	private static String enqueueOnObject( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
 	    List<Value> args ) {
-		ClassType	helperClass	= getHelperClass( vmController );
-		List<Value>	taskArgs	= List.of( target, vmController.vm.mirrorOf( methodName ), convertToMirrorStringArray( vmController, paramTypeNames ),
+		ClassType helperClass = getHelperClass( vmController );
+		if ( helperClass == null ) {
+			LOGGER.severe( "DebuggerHelper class not found for enqueueOnObject" );
+			return null;
+		}
+
+		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
+		if ( debugThread == null ) {
+			LOGGER.severe( "Debug thread not available for enqueueOnObject" );
+			return null;
+		}
+
+		List<Value> taskArgs = List.of( target, vmController.vm.mirrorOf( methodName ), convertToMirrorStringArray( vmController, paramTypeNames ),
 		    convertToMirrorObjectArray( vmController, args ) );
 
 		try {
 			Value taskIdVal = helperClass.invokeMethod(
-			    vmController.getPreparedDebugInvokeThread(),
+			    debugThread,
 			    helperClass.methodsByName( "enqueueOnObject" ).get( 0 ),
 			    taskArgs,
 			    ObjectReference.INVOKE_SINGLE_THREADED

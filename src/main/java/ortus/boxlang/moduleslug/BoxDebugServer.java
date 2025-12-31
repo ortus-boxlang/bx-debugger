@@ -118,7 +118,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsTerminateRequest( true );
 
 		capabilities.setSupportsFunctionBreakpoints( false );
-		capabilities.setSupportsHitConditionalBreakpoints( false );
+		capabilities.setSupportsHitConditionalBreakpoints( true );
+		capabilities.setSupportsLogPoints( true );
 		capabilities.setSupportsStepBack( false );
 		capabilities.setSupportsSetVariable( false );
 		capabilities.setSupportsRestartFrame( false );
