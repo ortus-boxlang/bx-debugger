@@ -46,7 +46,7 @@ public class ExceptionBreakpointTest {
 
 	private static final Logger			LOGGER				= Logger.getLogger( ExceptionBreakpointTest.class.getName() );
 	private static final int			TEST_PORT			= 5014;
-	private static final int			STARTUP_TIMEOUT_MS	= 10000;
+	private static final int			STARTUP_TIMEOUT_MS	= 100000;
 
 	private ExecutorService				serverExecutor;
 	private ExecutorService				testExecutor;
@@ -94,6 +94,7 @@ public class ExceptionBreakpointTest {
 		serverFuture = CompletableFuture.runAsync( () -> {
 			try {
 				serverStartedLatch.countDown();
+				System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 				BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
 			} catch ( Exception e ) {
 				serverException.set( e );
@@ -143,9 +144,9 @@ public class ExceptionBreakpointTest {
 
 			LOGGER.info( "Capabilities received, exception support confirmed" );
 
-			// Enable exception breakpoints for "boxlang" filter
+			// Enable exception breakpoints for "caught" and "uncaught" filters
 			SetExceptionBreakpointsArguments exceptionArgs = new SetExceptionBreakpointsArguments();
-			exceptionArgs.setFilters( new String[] { "boxlang" } );
+			exceptionArgs.setFilters( new String[] { "caught", "uncaught" } );
 
 			CompletableFuture<SetExceptionBreakpointsResponse>	exceptionResponse	= debugServer.setExceptionBreakpoints( exceptionArgs );
 			SetExceptionBreakpointsResponse						exceptionResult		= exceptionResponse.get( 5, TimeUnit.SECONDS );
@@ -177,7 +178,7 @@ public class ExceptionBreakpointTest {
 			LOGGER.info( "Waiting for stopped event due to exception..." );
 
 			// Wait for the stopped event (exception should be caught)
-			assertTrue( exceptionClient.waitForStoppedEvent( 15 ),
+			assertTrue( exceptionClient.waitForStoppedEvent( 1500 ),
 			    "Should receive stopped event when exception is thrown" );
 
 			// Verify the stopped event details

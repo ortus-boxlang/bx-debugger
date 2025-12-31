@@ -85,7 +85,8 @@ public class VMController {
 
 	// Exception breakpoint support
 	private static final String												BOX_RUNTIME_EXCEPTION_CLASS		= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
-	private volatile boolean												exceptionBreakpointsEnabled		= false;
+	private volatile boolean												caughtExceptionsEnabled			= false;
+	private volatile boolean												uncaughtExceptionsEnabled		= false;
 	private ExceptionRequest												exceptionRequest				= null;
 	private final Map<Long, ExceptionInfo>									exceptionInfoByThread			= new ConcurrentHashMap<>();
 
@@ -214,6 +215,29 @@ public class VMController {
 			setupClassPrepareEvents();
 			setupMethodEntryRequest();
 		}
+	}
+
+	public VMController( VMController old, VirtualMachine vm, IDebugProtocolClient client ) {
+		this.vm		= vm;
+		this.client	= client;
+
+		// Migrate existing breakpoints
+		this.activeBreakpoints.addAll( old.activeBreakpoints );
+
+		// Migrate pending breakpoints
+		if ( old.pendingBreakpointsByFile != null ) {
+			old.pendingBreakpointsByFile.forEach( ( path, list ) -> {
+				list.forEach( p -> storePendingBreakpoint( p.getSource(), p.getSourceBreakpoint(), p.getBreakpoint() ) );
+			} );
+		}
+
+		this.setExceptionBreakpoints( old.caughtExceptionsEnabled, old.uncaughtExceptionsEnabled );
+
+		if ( vm != null ) {
+			setupClassPrepareEvents();
+			setupMethodEntryRequest();
+		}
+
 	}
 
 	public CompletableFuture<Value> invokeStatic( String className, String methodName, List<String> paramTypes, List<Value> args ) {
@@ -440,19 +464,21 @@ public class VMController {
 	}
 
 	/**
-	 * Enable or disable exception breakpoints for BoxLang exceptions
+	 * Configure exception breakpoints for BoxLang exceptions
 	 * 
-	 * @param enabled true to enable, false to disable
+	 * @param caught   true to break on caught exceptions
+	 * @param uncaught true to break on uncaught exceptions
 	 */
-	public void setExceptionBreakpointsEnabled( boolean enabled ) {
-		this.exceptionBreakpointsEnabled = enabled;
+	public void setExceptionBreakpoints( boolean caught, boolean uncaught ) {
+		this.caughtExceptionsEnabled	= caught;
+		this.uncaughtExceptionsEnabled	= uncaught;
 
 		if ( vm == null ) {
-			LOGGER.info( "VM not available, exception breakpoints will be set when VM is ready. Enabled=" + enabled );
+			LOGGER.info( "VM not available, exception breakpoints will be set when VM is ready. Caught=" + caught + ", Uncaught=" + uncaught );
 			return;
 		}
 
-		if ( enabled ) {
+		if ( caught || uncaught ) {
 			setupExceptionRequest();
 		} else {
 			clearExceptionRequest();
@@ -504,12 +530,13 @@ public class VMController {
 		try {
 			EventRequestManager requestManager = vm.eventRequestManager();
 
-			// Create exception request for caught and uncaught BoxRuntimeException
-			exceptionRequest = requestManager.createExceptionRequest( exceptionClass, true, true );
+			// Create exception request based on caught/uncaught settings
+			exceptionRequest = requestManager.createExceptionRequest( exceptionClass, caughtExceptionsEnabled, uncaughtExceptionsEnabled );
 			exceptionRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 			exceptionRequest.enable();
 
-			LOGGER.info( "Created exception request for " + BOX_RUNTIME_EXCEPTION_CLASS );
+			LOGGER.info( "Created exception request for " + BOX_RUNTIME_EXCEPTION_CLASS + " (caught=" + caughtExceptionsEnabled + ", uncaught="
+			    + uncaughtExceptionsEnabled + ")" );
 		} catch ( Exception e ) {
 			LOGGER.severe( "Failed to create exception request: " + e.getMessage() );
 		}
@@ -1331,7 +1358,7 @@ public class VMController {
 		LOGGER.info( "Class loaded: " + refType.name() );
 
 		// Check if this is the BoxRuntimeException class and we have exception breakpoints enabled
-		if ( refType.name().equals( BOX_RUNTIME_EXCEPTION_CLASS ) && exceptionBreakpointsEnabled && exceptionRequest == null ) {
+		if ( refType.name().equals( BOX_RUNTIME_EXCEPTION_CLASS ) && ( caughtExceptionsEnabled || uncaughtExceptionsEnabled ) && exceptionRequest == null ) {
 			LOGGER.info( "BoxRuntimeException class loaded, setting up exception request" );
 			createExceptionRequest( refType );
 		}

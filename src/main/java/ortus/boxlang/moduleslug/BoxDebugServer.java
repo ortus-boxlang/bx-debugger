@@ -133,14 +133,21 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setSupportsExceptionInfoRequest( true );
 
 		// Set up exception breakpoint filters for BoxLang
-		ExceptionBreakpointsFilter boxlangExceptionFilter = new ExceptionBreakpointsFilter();
-		boxlangExceptionFilter.setFilter( "boxlang" );
-		boxlangExceptionFilter.setLabel( "BoxLang Exceptions" );
-		boxlangExceptionFilter.setDescription( "Break on caught or uncaught BoxLang runtime exceptions" );
-		boxlangExceptionFilter.setDefault_( false );
-		boxlangExceptionFilter.setSupportsCondition( false );
+		ExceptionBreakpointsFilter caughtExceptionFilter = new ExceptionBreakpointsFilter();
+		caughtExceptionFilter.setFilter( "caught" );
+		caughtExceptionFilter.setLabel( "Caught Exceptions" );
+		caughtExceptionFilter.setDescription( "Break on caught BoxLang runtime exceptions" );
+		caughtExceptionFilter.setDefault_( false );
+		caughtExceptionFilter.setSupportsCondition( false );
 
-		capabilities.setExceptionBreakpointFilters( new ExceptionBreakpointsFilter[] { boxlangExceptionFilter } );
+		ExceptionBreakpointsFilter uncaughtExceptionFilter = new ExceptionBreakpointsFilter();
+		uncaughtExceptionFilter.setFilter( "uncaught" );
+		uncaughtExceptionFilter.setLabel( "Uncaught Exceptions" );
+		uncaughtExceptionFilter.setDescription( "Break on uncaught BoxLang runtime exceptions" );
+		uncaughtExceptionFilter.setDefault_( false );
+		uncaughtExceptionFilter.setSupportsCondition( false );
+
+		capabilities.setExceptionBreakpointFilters( new ExceptionBreakpointsFilter[] { caughtExceptionFilter, uncaughtExceptionFilter } );
 		capabilities.setSupportsDelayedStackTraceLoading( false );
 		capabilities.setSupportsLoadedSourcesRequest( false );
 		capabilities.setSupportsLogPoints( false );
@@ -200,10 +207,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			} else {
 				// If you want to migrate pending breakpoints (mirrors launch logic)
 				VMController old = vmController;
-				vmController = new VMController( vm, client );
-				old.getAllPendingBreakpoints().forEach( ( path, list ) -> {
-					list.forEach( p -> vmController.storePendingBreakpoint( p.getSource(), p.getSourceBreakpoint(), p.getBreakpoint() ) );
-				} );
+				vmController = new VMController( old, vm, client );
 			}
 
 			this.variableManager = new VariableManager( vmController );
@@ -238,19 +242,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					vmController = new VMController( vm, client );
 				} else {
 					// Transfer pending breakpoints to a new manager with the VM
-					VMController oldManager = vmController;
-					vmController = new VMController( vm, client );
-
-					// Transfer pending breakpoints from the temporary manager
-					for ( Map.Entry<String, List<VMController.PendingBreakpoint>> entry : oldManager.getAllPendingBreakpoints().entrySet() ) {
-						for ( VMController.PendingBreakpoint pending : entry.getValue() ) {
-							vmController.storePendingBreakpoint(
-							    pending.getSource(),
-							    pending.getSourceBreakpoint(),
-							    pending.getBreakpoint()
-							);
-						}
-					}
+					VMController old = vmController;
+					vmController = new VMController( old, vm, client );
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
 
@@ -413,23 +406,25 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				LOGGER.info( "Created temporary VMController for exception breakpoints" );
 			}
 
-			// Check if "boxlang" filter is enabled
-			String[]	filters						= args.getFilters();
-			boolean		boxlangExceptionsEnabled	= false;
+			// Check if "caught" and/or "uncaught" filters are enabled
+			String[]	filters			= args.getFilters();
+			boolean		caughtEnabled	= false;
+			boolean		uncaughtEnabled	= false;
 
 			if ( filters != null ) {
 				for ( String filter : filters ) {
-					if ( "boxlang".equals( filter ) ) {
-						boxlangExceptionsEnabled = true;
-						break;
+					if ( "caught".equals( filter ) ) {
+						caughtEnabled = true;
+					} else if ( "uncaught".equals( filter ) ) {
+						uncaughtEnabled = true;
 					}
 				}
 			}
 
 			// Configure exception breakpoints in VMController
-			vmController.setExceptionBreakpointsEnabled( boxlangExceptionsEnabled );
+			vmController.setExceptionBreakpoints( caughtEnabled, uncaughtEnabled );
 
-			LOGGER.info( "Exception breakpoints configured: boxlang=" + boxlangExceptionsEnabled );
+			LOGGER.info( "Exception breakpoints configured: caught=" + caughtEnabled + ", uncaught=" + uncaughtEnabled );
 
 			return response;
 		} );
