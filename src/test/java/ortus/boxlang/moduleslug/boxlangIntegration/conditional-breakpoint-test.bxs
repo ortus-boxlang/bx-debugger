@@ -1,0 +1,21 @@
+// Test file for conditional breakpoints
+// This script is used to test:
+// 1. Condition expressions (e.g., i > 5)
+// 2. Hit count conditions (e.g., stop on 3rd hit)
+// 3. Log points (log message without stopping)
+
+counter = 0
+
+// Loop that we can use to test hit conditions and conditional breakpoints
+for ( i = 1; i <= 10; i++ ) {
+    counter = counter + 1  // Line 11 - test conditional breakpoint: i > 5
+    println( "Iteration " & i )  // Line 12 - test log point
+}
+
+// Test data for condition evaluation
+x = 10
+y = 20
+result = x + y  // Line 18 - test condition: result == 30
+
+println( "Final counter: " & counter )
+println( "Result: " & result )

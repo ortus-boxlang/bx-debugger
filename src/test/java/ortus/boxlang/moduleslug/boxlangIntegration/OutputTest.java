@@ -89,6 +89,7 @@ public class OutputTest {
 		serverFuture = CompletableFuture.runAsync( () -> {
 			try {
 				serverStartedLatch.countDown();
+				System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 				BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
 			} catch ( Exception e ) {
 				serverException.set( e );

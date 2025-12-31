@@ -30,6 +30,7 @@ public class DebugServerTestUtils {
 		var debuggerThread = new Thread( () -> {
 			try {
 				serverStartupLatch.countDown();
+				System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 				BoxDebugger.main( new String[] { String.valueOf( port ) } );
 			} catch ( Exception e ) {
 				e.printStackTrace();

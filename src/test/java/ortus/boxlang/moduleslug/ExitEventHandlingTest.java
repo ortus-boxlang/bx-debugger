@@ -25,6 +25,7 @@ class ExitEventHandlingTest {
 	void setUp() {
 		testClient	= new TestDebugClient();
 		debugServer	= new BoxDebugServer();
+		debugServer.setFalseExit( true );
 		debugServer.connect( testClient );
 	}
 

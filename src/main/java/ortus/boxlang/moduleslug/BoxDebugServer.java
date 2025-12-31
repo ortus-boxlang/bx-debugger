@@ -82,6 +82,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private final Object									exitLock				= new Object();
 
 	private IVMConnection									vmConnection			= null;
+	private boolean											falseExit				= false;
+
+	public BoxDebugServer() {
+		parseFalseExitProperty();
+	}
 
 	/**
 	 * Connect to the language client
@@ -89,6 +94,15 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	public void connect( IDebugProtocolClient client ) {
 		this.client = client;
 		LOGGER.info( "Connected to debug client" );
+	}
+
+	private void parseFalseExitProperty() {
+		String falseExitProp = System.getProperty( "BOX_DEBUGGER_FALSEEXIT", "false" );
+		this.falseExit = Boolean.parseBoolean( falseExitProp );
+	}
+
+	public void setFalseExit( boolean falseExit ) {
+		this.falseExit = falseExit;
 	}
 
 	@Override
@@ -782,7 +796,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Exit the current process after handling the debuggee's exit
 			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
-			System.exit( 0 );
+			if ( !falseExit ) {
+				System.exit( 0 );
+			}
 		}
 	}
 
@@ -807,7 +823,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Exit the current process after handling the debuggee's exit
 			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
-			System.exit( 0 );
+			if ( !falseExit ) {
+				System.exit( 0 );
+			}
 		}
 	}
 
