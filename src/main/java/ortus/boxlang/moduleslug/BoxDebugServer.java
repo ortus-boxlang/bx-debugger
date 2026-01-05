@@ -70,6 +70,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private VMController									vmController;
 	private VariableManager									variableManager;
 	private SourceManager									sourceManager			= new SourceManager();
+	private PathMappingService								pathMappingService;
 	// Ensure we only start output monitoring once per session
 	private final java.util.concurrent.atomic.AtomicBoolean	outputMonitoringStarted	= new java.util.concurrent.atomic.AtomicBoolean( false );
 
@@ -103,6 +104,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	public void setFalseExit( boolean falseExit ) {
 		this.falseExit = falseExit;
+	}
+
+	/**
+	 * Configure debug mode and path mapping from launch/attach arguments.
+	 * 
+	 * @param args the launch or attach arguments map
+	 */
+	private void configureDebugSettings( Map<String, Object> args ) {
+		String requestedMode = ( String ) args.get( "debugMode" );
+		if ( requestedMode != null ) {
+			debugMode = requestedMode;
+		}
+		LOGGER.info( "Debug mode set to: " + debugMode );
+
+		String	localRoot		= ( String ) args.get( "localRoot" );
+		String	remoteRoot		= ( String ) args.get( "remoteRoot" );
+		String	workspaceFolder	= ( String ) args.get( "workspaceFolder" );
+		pathMappingService = new PathMappingService( localRoot, remoteRoot, workspaceFolder );
 	}
 
 	@Override
@@ -183,16 +202,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				LOGGER.warning( "Attach requested but VM already present" );
 				return null;
 			}
-			String serverName = ( String ) args.getOrDefault( "serverName", "" );
+			String	serverName	= ( String ) args.getOrDefault( "serverName", "" );
+			int		port		= ( int ) ( ( Double ) args.getOrDefault( "serverPort", "0" ) ).doubleValue();
+			// int port = ( int ) Double.parseDouble( strPort );
 
-			if ( serverName.isEmpty() ) {
-				LOGGER.warning( "Attach requested but serverName is empty" );
+			if ( serverName.isEmpty() && port == 0 ) {
+				LOGGER.warning( "Attach requested but neither serverName nor serverPort is provided" );
 				return null;
 			}
 
+			configureDebugSettings( args );
+
 			try {
-				this.vmConnection	= new ortus.boxlang.moduleslug.vm.CommandBoxConnection( serverName );
-				this.vm				= vmConnection.getVirtualMachine();
+				if ( port > 0 ) {
+					this.vmConnection = new ortus.boxlang.moduleslug.vm.BareJDWPConnection( "localhost", port );
+				} else {
+					this.vmConnection = new ortus.boxlang.moduleslug.vm.CommandBoxConnection( serverName );
+				}
+				this.vm = vmConnection.getVirtualMachine();
 			} catch ( Exception e ) {
 				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
 				e.printStackTrace();
@@ -210,6 +237,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				vmController = new VMController( old, vm, client );
 			}
 
+			// Configure path mapping for remote debugging support
+			if ( pathMappingService != null ) {
+				vmController.setPathMappingService( pathMappingService );
+			}
+
 			this.variableManager = new VariableManager( vmController );
 
 			startOutputMonitoring(); // may be a no-op if remote
@@ -224,20 +256,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
 
-				// Configure debug mode
-				String requestedMode = ( String ) args.get( "debugMode" );
-				if ( requestedMode != null ) {
-					debugMode = requestedMode;
-				}
-				LOGGER.info( "Debug mode set to: " + debugMode );
+				configureDebugSettings( args );
 
 				this.vmConnection	= new ortus.boxlang.moduleslug.vm.LaunchedConnection( program );
 				this.vm				= vmConnection.getVirtualMachine();
 
-				// Start output monitoring as early as possible to avoid missing early program output
-				startOutputMonitoring();
-
-				// Initialize or update breakpoint manager with the VM
+				// Initialize or update breakpoint manager with the VM BEFORE starting output monitoring
+				// This sets up ClassPrepareRequest before the VM is resumed
 				if ( vmController == null ) {
 					vmController = new VMController( vm, client );
 				} else {
@@ -245,6 +270,21 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					VMController old = vmController;
 					vmController = new VMController( old, vm, client );
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
+				}
+
+				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
+				vmController.startEventProcessing();
+
+				// Now load the debug agent, which resumes the VM
+				// This must happen AFTER VMController is created and event processing started
+				IVMConnection.loadDebugAgent( vmConnection );
+
+				// Start output monitoring after VM is resumed
+				startOutputMonitoring();
+
+				// Configure path mapping for remote debugging support
+				if ( pathMappingService != null ) {
+					vmController.setPathMappingService( pathMappingService );
 				}
 
 				this.variableManager = new VariableManager( vmController );
@@ -373,19 +413,48 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
 			}
 
+			// Initialize path mapping if not yet available
+			if ( pathMappingService == null ) {
+				pathMappingService = new PathMappingService( null, null, null );
+			}
+
+			// Get the original local path for the response (client's path)
+			String	localPath		= args.getSource() != null ? args.getSource().getPath() : null;
+
+			// Translate to remote path for the debuggee
+			String	remotePath		= localPath != null ? pathMappingService.toRemotePath( localPath ) : null;
+
+			// Create a source with the remote path for the VMController
+			Source	remoteSource	= new Source();
+			if ( args.getSource() != null ) {
+				remoteSource.setName( args.getSource().getName() );
+				remoteSource.setPath( remotePath );
+				remoteSource.setSourceReference( args.getSource().getSourceReference() );
+			}
+
 			// Clear existing pending breakpoints for this file first
 			// (setBreakpoints replaces all breakpoints for the file)
-			if ( args.getSource() != null && args.getSource().getPath() != null ) {
-				vmController.clearPendingBreakpointsForFile( args.getSource().getPath() );
+			if ( remotePath != null ) {
+				vmController.clearPendingBreakpointsForFile( remotePath );
+				// Also clear using local path in case there are any stored with the original path
+				if ( !remotePath.equals( localPath ) ) {
+					vmController.clearPendingBreakpointsForFile( localPath );
+				}
 			}
 
 			if ( args.getBreakpoints() != null ) {
 				for ( SourceBreakpoint sourceBreakpoint : args.getBreakpoints() ) {
-					// Use the encapsulated method to track the breakpoint
-					Breakpoint breakpoint = vmController.trackSourceBreakpoint( args.getSource(), sourceBreakpoint );
+					// Use the encapsulated method to track the breakpoint with remote path
+					Breakpoint breakpoint = vmController.trackSourceBreakpoint( remoteSource, sourceBreakpoint );
+					// Update the response breakpoint to show the local path to the client
+					if ( breakpoint.getSource() != null && localPath != null ) {
+						breakpoint.getSource().setPath( localPath );
+					}
 					responseBreakpoints.add( breakpoint );
 				}
 			}
+
+			verifyAndSetPendingBreakpoints();
 
 			response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
 
@@ -697,6 +766,15 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			List<StackFrame> page = ( start < end ) ? filteredFrames.subList( start, end ) : new ArrayList<>();
+
+			// Translate remote paths in stack frames back to local paths for the client
+			for ( StackFrame frame : page ) {
+				if ( frame.getSource() != null && frame.getSource().getPath() != null ) {
+					String	remotePath	= frame.getSource().getPath();
+					String	localPath	= pathMappingService.toLocalPath( remotePath );
+					frame.getSource().setPath( localPath );
+				}
+			}
 
 			response.setStackFrames( page.toArray( StackFrame[]::new ) );
 
@@ -1170,7 +1248,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	/**
-	 * Enhanced source request handler that retrieves source content
+	 * Enhanced source request handler that retrieves source content.
+	 * Translates remote paths to local paths for file reading.
 	 * 
 	 * @param source the source to retrieve content for
 	 * 
@@ -1180,13 +1259,30 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		SourceResponse response = new SourceResponse();
 
 		try {
-			String content = sourceManager.getSourceContent( source );
-			response.setContent( content );
+			// If we have a path, try to translate it to local path for reading
+			if ( source.getPath() != null && pathMappingService != null ) {
+				String	localPath	= pathMappingService.toLocalPath( source.getPath() );
+				// Create a modified source with local path for reading
+				Source	localSource	= new Source();
+				localSource.setName( source.getName() );
+				localSource.setPath( localPath );
+				localSource.setSourceReference( source.getSourceReference() );
 
-			if ( source.getPath() != null ) {
-				LOGGER.info( "Retrieved source content for file: " + source.getPath() + " (length: " + content.length() + ")" );
+				String content = sourceManager.getSourceContent( localSource );
+				response.setContent( content );
+
+				LOGGER.info( "Retrieved source content for file: " + source.getPath() +
+				    ( !localPath.equals( source.getPath() ) ? " (translated to: " + localPath + ")" : "" ) +
+				    " (length: " + content.length() + ")" );
 			} else {
-				LOGGER.info( "Retrieved source content for reference: " + source.getSourceReference() + " (length: " + content.length() + ")" );
+				String content = sourceManager.getSourceContent( source );
+				response.setContent( content );
+
+				if ( source.getPath() != null ) {
+					LOGGER.info( "Retrieved source content for file: " + source.getPath() + " (length: " + content.length() + ")" );
+				} else {
+					LOGGER.info( "Retrieved source content for reference: " + source.getSourceReference() + " (length: " + content.length() + ")" );
+				}
 			}
 
 		} catch ( Exception e ) {

@@ -1,0 +1,24 @@
+// Test script for class reload breakpoint functionality
+// This script imports and uses a dynamically generated Thing.bx class
+// The test will:
+// 1. Create Thing.bx with a doSomething function
+// 2. Hit a breakpoint in that function
+// 3. Modify Thing.bx with a new line
+// 4. Call the function again (triggering recompilation)
+// 5. Verify the new breakpoint is hit
+
+// Include Thing.bx from the same directory
+include "Thing.bx";
+
+// First invocation - should hit the initial breakpoint
+result1 = doSomething( "first" );
+println( "First result: " & result1 );
+
+// Signal that we're ready for the class to be modified
+// The test will modify Thing.bx after we hit the first breakpoint and continue
+
+// Second invocation - should hit the new breakpoint after class reload
+result2 = doSomething( "second" );
+println( "Second result: " & result2 );
+
+println( "Class reload test complete" );

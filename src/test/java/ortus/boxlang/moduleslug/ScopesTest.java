@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
@@ -86,21 +87,26 @@ public class ScopesTest {
 				CompletableFuture<Capabilities>	initResponse	= server.initialize( initArgs );
 				Capabilities					capabilities	= initResponse.get( TIMEOUT, TimeUnit.SECONDS );
 
+				client.waitForInitializedEvent().get( TIMEOUT, TimeUnit.SECONDS );
+
 				// SET BREAKPOINTS
 
-				SetBreakpointsArguments			breakpointArgs	= new SetBreakpointsArguments();
+				SetBreakpointsArguments	breakpointArgs	= new SetBreakpointsArguments();
 
-				Source							source			= new Source();
+				Source					source			= new Source();
 				source.setPath( breakpointFile.toString() );
 				source.setName( "breakpoint.bxs" );
 				breakpointArgs.setSource( source );
 
-				SourceBreakpoint functionBreakpoint = new SourceBreakpoint();
-				functionBreakpoint.setLine( 3 );
+				int					functionBreakpointLine	= 3;
+				int					scriptBreakpointLine	= 6;
+
+				SourceBreakpoint	functionBreakpoint		= new SourceBreakpoint();
+				functionBreakpoint.setLine( functionBreakpointLine );
 				functionBreakpoint.setCondition( null ); // No condition
 
 				SourceBreakpoint scriptBreakpoint = new SourceBreakpoint();
-				scriptBreakpoint.setLine( 6 );
+				scriptBreakpoint.setLine( scriptBreakpointLine );
 				scriptBreakpoint.setCondition( null ); // No condition
 
 				breakpointArgs.setBreakpoints( new SourceBreakpoint[] { functionBreakpoint, scriptBreakpoint } );
@@ -114,23 +120,23 @@ public class ScopesTest {
 
 				// TODO figure out why the function breakpoint returns line 0
 				List.of( breakpointResult.getBreakpoints() ).stream()
-				    .filter( b -> b.getLine() == 3 )
+				    .filter( b -> b.getLine() == functionBreakpointLine )
 				    .findFirst()
 				    .ifPresentOrElse( b -> {
-					    assertThat( b.getLine() ).isEqualTo( 3 );
+					    assertThat( b.getLine() ).isEqualTo( functionBreakpointLine );
 					    assertThat( b.isVerified() ).isFalse();
 				    }, () -> {
-					    fail( "Function breakpoint for line 3 not found" );
+					    fail( "Function breakpoint for line " + functionBreakpointLine + " not found" );
 				    } );
 
 				List.of( breakpointResult.getBreakpoints() ).stream()
-				    .filter( b -> b.getLine() == 6 )
+				    .filter( b -> b.getLine() == scriptBreakpointLine )
 				    .findFirst()
 				    .ifPresentOrElse( b -> {
-					    assertThat( b.getLine() ).isEqualTo( 6 );
+					    assertThat( b.getLine() ).isEqualTo( scriptBreakpointLine );
 					    assertThat( b.isVerified() ).isFalse();
 				    }, () -> {
-					    fail( "Function breakpoint for line 6 not found" );
+					    fail( "Function breakpoint for line " + scriptBreakpointLine + " not found" );
 				    } );
 
 				// LAUNCH
@@ -161,7 +167,7 @@ public class ScopesTest {
 				stackTraceArgs.setThreadId( stoppedArgs.getThreadId() );
 				CompletableFuture<StackTraceResponse>	stackTraceResponse	= server.stackTrace( stackTraceArgs );
 				StackTraceResponse						stackTraceResult	= stackTraceResponse.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
-				assertThat( stackTraceResult.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
+				assertThat( Files.isSameFile( Paths.get( stackTraceResult.getStackFrames()[ 0 ].getSource().getPath() ), breakpointFile ) ).isTrue();                                                                                                                // response
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getLine() ).isEqualTo( 6 );                                                                                                                // response
 
@@ -192,7 +198,7 @@ public class ScopesTest {
 				stackTraceArgs2.setThreadId( stoppedArgs2.getThreadId() );
 				CompletableFuture<StackTraceResponse>	stackTraceResponse2	= server.stackTrace( stackTraceArgs2 );
 				StackTraceResponse						stackTraceResult2	= stackTraceResponse2.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
-				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
+				assertThat( Files.isSameFile( Paths.get( stackTraceResult2.getStackFrames()[ 0 ].getSource().getPath() ), breakpointFile ) ).isTrue();                                                                                                                // response
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getLine() ).isEqualTo( 3 );
 

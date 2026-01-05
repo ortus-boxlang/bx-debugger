@@ -24,6 +24,15 @@
             "request": "launch",
             "program": "${file}",
             "debugServer": 9898
+        },
+        {
+            "type": "boxlang",
+            "name": "BoxDebugger - Remote",
+            "request": "attach",
+            "debugServer": 9898,
+            "serverPort": 9888,
+            "localRoot": "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\docker-test",
+            "remoteRoot": "/app"
         }
     ]
 }

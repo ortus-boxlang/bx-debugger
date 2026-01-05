@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
@@ -169,7 +170,7 @@ public class FullDebugSessionTest {
 				stackTraceArgs.setThreadId( stoppedArgs.getThreadId() );
 				CompletableFuture<StackTraceResponse>	stackTraceResponse	= server.stackTrace( stackTraceArgs );
 				StackTraceResponse						stackTraceResult	= stackTraceResponse.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
-				assertThat( stackTraceResult.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
+				assertThat( Files.isSameFile( Paths.get( stackTraceResult.getStackFrames()[ 0 ].getSource().getPath() ), breakpointFile ) ).isTrue();                                                                                                                // response
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
 				assertThat( stackTraceResult.getStackFrames()[ 0 ].getLine() ).isEqualTo( breakpointTwo );                                                                                                                // response
 

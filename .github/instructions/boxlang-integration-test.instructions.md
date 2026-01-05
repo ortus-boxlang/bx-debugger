@@ -12,3 +12,7 @@ When you implement a test you should:
 
 - Use `[FullDebugSessionTest](../../src/test/java/ortus/boxlang/moduleslug/FullDebugSessionTest.java)` as an example of how to structure your test. DO NOT MODIFY THIS FILE.
 - Create a new Java test file in the `boxlangIntegration` directory.
+
+# Troubleshooting
+
+If the tests are failing and you see an error like `WARNING: Failed to start debug exec thread: Agent JAR not found` in the test output then you need to run the gradel build to generate the agent JAR file: `./gradlew debugAgentJar`

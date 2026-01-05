@@ -106,18 +106,6 @@ public class BoxDebuggerTest {
 	}
 
 	@Test
-	void testInvalidPortArgument() {
-		// Test with invalid port argument - should fall back to default
-		// This should not throw an exception, but use the default port
-		// We can't easily test this without actually starting the server,
-		// but we can at least verify the method doesn't crash
-		assertDoesNotThrow( () -> {
-			// Just verify the method can be called with invalid arguments
-			// The actual port parsing happens in the private method
-		} );
-	}
-
-	@Test
 	@Timeout( value = 15, unit = TimeUnit.SECONDS )
 	void testMultipleClientConnections() {
 		CountDownLatch			serverStartedLatch		= new CountDownLatch( 1 );
@@ -128,6 +116,7 @@ public class BoxDebuggerTest {
 															try {
 																serverRunning.set( true );
 																serverStartedLatch.countDown();
+																System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 																BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
 															} catch ( Exception e ) {
 																serverException.set( e );

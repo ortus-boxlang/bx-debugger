@@ -1,0 +1,27 @@
+<bx:script>
+
+function what(){
+        return "something";
+    }
+
+    x = 5;
+
+    y = "this is a test"
+    
+
+    x += 10;
+
+
+    y = 25
+
+    
+</bx:script>
+
+
+<bx:output>
+    #now()#
+    #y#
+    #x#
+    <br />
+    #what()#
+</bx:output>

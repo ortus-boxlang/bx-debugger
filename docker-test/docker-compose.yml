@@ -1,0 +1,11 @@
+services:
+  cf:
+    image: ortussolutions/commandbox:boxlang
+    pull_policy: always
+    ports:
+      - "8080:8080"
+      - "9888:8888"
+    volumes:
+      - ./index.bxm:/app/index.bxm
+      - ./server.json:/app/server.json
+      - ../build:/app/.boxlang/modules:ro

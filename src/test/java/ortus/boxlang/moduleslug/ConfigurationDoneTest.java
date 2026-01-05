@@ -79,6 +79,7 @@ public class ConfigurationDoneTest {
 		serverExecutor.submit( () -> {
 			try {
 				serverStartupLatch.countDown(); // Signal that we're about to start
+				System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 				BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
 			} catch ( Exception e ) {
 				serverException.set( e );
@@ -195,6 +196,7 @@ public class ConfigurationDoneTest {
 		serverExecutor.submit( () -> {
 			try {
 				serverStartupLatch.countDown();
+				System.setProperty( "BOX_DEBUGGER_FALSEEXIT", "true" );
 				BoxDebugger.main( new String[] { String.valueOf( TEST_PORT ) } );
 			} catch ( Exception e ) {
 				serverException.set( e );

@@ -13,6 +13,18 @@
 				"$gradle"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Test AttachRunningProcess",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$env:BOX_DEBUGGER_ATTACH_TEST='1'; ./gradlew.bat test --tests ortus.boxlang.moduleslug.AttachRunningProcessTest"
+			],
+			"isBackground": false,
+			"group": "test"
 		}
 	]
 }

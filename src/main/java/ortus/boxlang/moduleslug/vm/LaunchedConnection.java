@@ -19,7 +19,8 @@ public class LaunchedConnection implements IVMConnection {
 
 	public LaunchedConnection( String program ) throws Exception {
 		this.vm = startupVM( program );
-		IVMConnection.loadDebugAgent( this );
+		// Note: Do NOT call loadDebugAgent here - it resumes the VM
+		// The caller should set up class prepare events first, then call loadDebugAgent
 	}
 
 	@Override

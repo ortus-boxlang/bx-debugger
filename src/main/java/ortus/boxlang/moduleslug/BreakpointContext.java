@@ -104,6 +104,10 @@ public class BreakpointContext {
 			        List.of( vmController.vm.mirrorOf( "contextual" ) )
 			    );
 		    } )
+		    .thenApply( scopeStruct -> {
+
+			    return scopeStruct;
+		    } )
 		    .thenCompose( scopeStruct -> {
 			    return vmController.invoke(
 			        ( ObjectReference ) scopeStruct,
@@ -111,6 +115,10 @@ public class BreakpointContext {
 			        List.of(),
 			        List.of()
 			    );
+		    } )
+		    .thenApply( scopeStruct -> {
+
+			    return scopeStruct;
 		    } )
 		    .thenCompose( scopeList -> vmController.invoke(
 		        ( ObjectReference ) scopeList,

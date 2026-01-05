@@ -43,3 +43,6 @@ In "Java" mode, the debugger will return all frames, including Java frames. This
 
 In all cases, any frame that represents code that is located in a BoxLang source file will need to be translated in a way that a BoxLang developer would expect it.
 For example, in a BoxLang method there will be variable and various scopes. Ultimately, those variables and scopes are stored in an `IBoxContext` object (usually named "context") and the debugger will need to present them as if they are local variables in the stack frame.
+
+# GuideLines for Development
+- When running tests run only the tests that are relevant to the code you are working on. This will speed up your feedback loop.
