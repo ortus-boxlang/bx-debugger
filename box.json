@@ -1,16 +1,16 @@
 {
 	"name": "@MODULE_NAME@",
 	"version": "@build.version@+@build.number@",
-	"location": "https://downloads.ortussolutions.com/ortussolutions/boxlang-modules/@MODULE_SLUG@/@build.version@/@MODULE_SLUG@-@build.version@.zip",
+	"location": "https://downloads.ortussolutions.com/ortussolutions/boxlang-modules/bx-debugger/@build.version@/bx-debugger-@build.version@.zip",
 	"author": "Ortus Solutions",
-	"homepage": "https://github.com/ortus-boxlang/@MODULE_SLUG@",
-	"documentation": "https://github.com/ortus-boxlang/@MODULE_SLUG@",
+	"homepage": "https://github.com/ortus-boxlang/bx-debugger",
+	"documentation": "https://github.com/ortus-boxlang/bx-debugger",
 	"repository": {
 		"type": "git",
-		"URL": "https://github.com/ortus-boxlang/@MODULE_SLUG@"
+		"URL": "https://github.com/ortus-boxlang/bx-debugger"
 	},
 	"bugs": "https://ortussolutions.atlassian.net/browse/BLMODULES",
-	"slug": "@MODULE_SLUG@",
+	"slug": "bx-debugger",
 	"shortDescription": "Module template for BoxLang modules",
 	"type": "boxlang-modules",
 	"keywords": ["boxlang"],
