@@ -49,8 +49,8 @@ dependencies {
 
 
 	// LSP4J - Language Server Protocol for Java
-	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j:0.23.1"
-	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j.debug:0.23.1"
+	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j:0.24.0"
+	implementation "org.eclipse.lsp4j:org.eclipse.lsp4j.debug:0.24.0"
 	
 	// SLF4J for logging
 	// implementation "org.slf4j:slf4j-api:2.0.9"
