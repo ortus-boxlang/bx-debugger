@@ -2,8 +2,11 @@ package ortus.boxlang.bxdebugger.vm;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Optional;
+import java.util.stream.Stream;
 
 import com.sun.jdi.VirtualMachine;
 import com.sun.tools.attach.AttachNotSupportedException;
@@ -32,29 +35,40 @@ public interface IVMConnection {
 	public com.sun.tools.attach.VirtualMachine getAttachVirtualMachine() throws AttachNotSupportedException, IOException;
 
 	private static String getDebugAgentPath() {
-		if ( System.getProperty( "boxlang.debugger.agentjarpath" ) != null ) {
-			return System.getProperty( "boxlang.debugger.agentjarpath" );
+		String override = System.getProperty( "boxlang.debugger.agentjarpath" );
+		if ( override != null && !override.isBlank() ) {
+			return override;
 		}
-		// Get the path to the JAR file containing this class
-		Path jarPath;
 		try {
-			jarPath = Paths.get( IVMConnection.class.getProtectionDomain().getCodeSource().getLocation().toURI() );
-
-			// Get the parent directory of the JAR
-			Path	jarDir			= jarPath.getParent();
-
-			// Create a path relative to the JAR directory
-			// Path relativePath = jarDir.resolve( "bx-debugger-agent.jar" );
-			Path	relativePath	= Paths.get( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\bx-debugger-1.0.0-snapshot-agent.jar" );
-
-			return relativePath.toString();
+			Path jarPath = Paths.get( IVMConnection.class.getProtectionDomain().getCodeSource().getLocation().toURI() );
+			Path searchDir = Files.isDirectory( jarPath ) ? jarPath : jarPath.getParent();
+			Optional<Path> agentJar = findAgentJar( searchDir );
+			if ( agentJar.isEmpty() ) {
+				Path buildLibs = Paths.get( "" ).toAbsolutePath().resolve( "build" ).resolve( "libs" );
+				agentJar = findAgentJar( buildLibs );
+			}
+			if ( agentJar.isPresent() ) {
+				return agentJar.get().toString();
+			}
 		} catch ( URISyntaxException e ) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
 
-		System.exit( 1 );
-		return null;
+		throw new IllegalStateException( "Debug agent JAR not found" );
+	}
+
+	private static Optional<Path> findAgentJar( Path directory ) {
+		if ( directory == null || !Files.isDirectory( directory ) ) {
+			return Optional.empty();
+		}
+		try ( Stream<Path> files = Files.list( directory ) ) {
+			return files
+			    .filter( path -> path.getFileName().toString().endsWith( "-agent.jar" ) )
+			    .sorted()
+			    .reduce( ( first, second ) -> second );
+		} catch ( IOException e ) {
+			return Optional.empty();
+		}
 	}
 
 }

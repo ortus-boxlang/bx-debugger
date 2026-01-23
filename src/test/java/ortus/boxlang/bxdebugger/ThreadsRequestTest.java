@@ -17,7 +17,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
+import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
+import org.eclipse.lsp4j.debug.Source;
+import org.eclipse.lsp4j.debug.SourceBreakpoint;
 import org.eclipse.lsp4j.debug.Thread;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
@@ -276,9 +280,21 @@ public class ThreadsRequestTest {
 
 			assertNotNull( capabilities, "Should receive capabilities" );
 
+			String testProgram = "src/test/resources/breakpoint.bxs";
+
+			SetBreakpointsArguments breakpointArgs = new SetBreakpointsArguments();
+			Source source = new Source();
+			source.setPath( testProgram );
+			breakpointArgs.setSource( source );
+
+			SourceBreakpoint breakpoint = new SourceBreakpoint();
+			breakpoint.setLine( 5 );
+			breakpointArgs.setBreakpoints( new SourceBreakpoint[] { breakpoint } );
+			debugServer.setBreakpoints( breakpointArgs ).get( 5, TimeUnit.SECONDS );
+
 			// Launch a BoxLang program to get an active VM
 			Map<String, Object>		launchArgs		= Map.of(
-			    "program", "src/test/resources/output.bxs" // Use existing test file
+			    "program", testProgram
 			);
 
 			CompletableFuture<Void>	launchFuture	= debugServer.launch( launchArgs );
@@ -286,8 +302,10 @@ public class ThreadsRequestTest {
 
 			LOGGER.info( "Program launched successfully" );
 
+			debugServer.configurationDone( new ConfigurationDoneArguments() ).get( 5, TimeUnit.SECONDS );
+
 			// Wait a moment for the VM to be fully initialized
-			java.lang.Thread.sleep( 3000 );
+			java.lang.Thread.sleep( 1000 );
 
 			// Test threads request with active VM
 			CompletableFuture<ThreadsResponse>	threadsFuture	= debugServer.threads();

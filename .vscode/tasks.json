@@ -21,7 +21,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"$env:BOX_DEBUGGER_ATTACH_TEST='1'; ./gradlew.bat test --tests ortus.boxlang.moduleslug.AttachRunningProcessTest"
+				"$env:BOX_DEBUGGER_ATTACH_TEST='1'; ./gradlew.bat test --tests ortus.boxlang.bxdebugger.AttachRunningProcessTest"
 			],
 			"isBackground": false,
 			"group": "test"

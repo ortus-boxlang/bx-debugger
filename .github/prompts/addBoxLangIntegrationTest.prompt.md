@@ -1,6 +1,6 @@
 Add a test for ${file}
 
-Check to see if there is a corresponding test file `src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/${fileBasenameNoExtension}.java`. If it does not exist then create it. This is the file where the tests will be implemented.
+Check to see if there is a corresponding test file `src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/${fileBasenameNoExtension}.java`. If it does not exist then create it. This is the file where the tests will be implemented.
 
 Read the contents of ${file}. The comments in that file will instruct you on what kind of test to create.
 

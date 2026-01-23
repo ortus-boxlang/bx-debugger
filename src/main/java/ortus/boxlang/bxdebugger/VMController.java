@@ -312,8 +312,8 @@ public class VMController {
 	public CompletableFuture<Void> pauseDebugThread() {
 		// create other debug thread request
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
-		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebuggerHelper" );
+		// // req.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebugHelper" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
 		LOGGER.info( "Set up method entry request for DebugAgent" );
@@ -1045,7 +1045,7 @@ public class VMController {
 
 		LOGGER.info( "Handling MethodEntryEvent for " + className + "." + methodName );
 
-		if ( className.equalsIgnoreCase( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
+		if ( className.equalsIgnoreCase( "ortus.boxlang.bxdebugger.instrumentation.DebuggerHelper" ) ) {
 			if ( !methodName.equals( "methodEntryBreakpointHook" ) ) {
 				event.thread().resume();
 				return;
@@ -1071,8 +1071,8 @@ public class VMController {
 			return;
 		}
 
-		if ( !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" )
-		    && !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
+		if ( !className.equals( "ortus.boxlang.bxdebugger.instrumentation.DebugAgent" )
+		    && !className.equals( "ortus.boxlang.bxdebugger.instrumentation.DebuggerHelper" ) ) {
 			event.thread().resume();
 			return;
 		}
@@ -1865,6 +1865,11 @@ public class VMController {
 	 * Verify and set pending breakpoints using JDI
 	 */
 	public void verifyAndSetPendingBreakpoints() {
+		if ( vm == null ) {
+			LOGGER.info( "VM not available, skipping pending breakpoint verification" );
+			return;
+		}
+
 		int totalPending = pendingBreakpointsById.size();
 		if ( totalPending > 0 ) {
 			LOGGER.info( "Setting " + totalPending + " pending breakpoints" );
@@ -2086,17 +2091,17 @@ public class VMController {
 
 	private void setupMethodEntryRequest() {
 		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.*" );
-		this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" );
-		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.*" );
+		this.methodEntryRequest.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebugAgent" );
+		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebugHelper" );
 		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		// this.methodEntryRequest.enable();
 		LOGGER.info( "Set up method entry request for DebugAgent" );
 
 		// create other debug thread request
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
-		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebuggerHelper" );
+		// // req.addClassFilter( "ortus.boxlang.bxdebugger.instrumentation.DebugHelper" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
 		LOGGER.info( "Set up method entry request for DebugAgent" );

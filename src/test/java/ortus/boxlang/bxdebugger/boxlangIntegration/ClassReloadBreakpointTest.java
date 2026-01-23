@@ -73,7 +73,7 @@ public class ClassReloadBreakpointTest {
 	void setUp() throws IOException {
 		serverExecutor = Executors.newSingleThreadExecutor();
 		serverException.set( null );
-		testDir = Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration" ).toAbsolutePath();
+		testDir = Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration" ).toAbsolutePath();
 	}
 
 	@AfterEach

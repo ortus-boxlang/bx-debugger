@@ -266,7 +266,7 @@ public class InvokeTools {
 	}
 
 	private static ClassType getHelperClass( VMController vmController ) {
-		List<ReferenceType> classes = vmController.vm.classesByName( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
+		List<ReferenceType> classes = vmController.vm.classesByName( "ortus.boxlang.bxdebugger.instrumentation.DebuggerHelper" );
 
 		return ( ClassType ) classes.get( 0 );
 	}

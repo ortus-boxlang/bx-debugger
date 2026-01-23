@@ -136,7 +136,7 @@ public class OutputTest {
 
 			// Launch the output-test.bxs program which should output the number 6
 			Map<String, Object>	launchArgs		= new HashMap<>();
-			Path				outputTestFile	= Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/output-test.bxs" ).toAbsolutePath();
+			Path				outputTestFile	= Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/output-test.bxs" ).toAbsolutePath();
 			assertTrue( outputTestFile.toFile().exists(), "output-test.bxs should exist" );
 
 			launchArgs.put( "program", outputTestFile.toString() );

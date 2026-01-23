@@ -249,14 +249,17 @@ public class PathMappingService {
 
 		String normalized = path;
 
-		// Try to convert to absolute path (may fail for remote paths)
-		try {
-			Path p = Paths.get( path );
-			if ( p.isAbsolute() || path.contains( ":" ) ) {
-				normalized = p.toAbsolutePath().normalize().toString();
+		boolean looksLikeWindowsPath = path.matches( "^[A-Za-z]:[\\\\/].*" );
+		if ( !looksLikeWindowsPath ) {
+			// Try to convert to absolute path (may fail for remote paths)
+			try {
+				Path p = Paths.get( path );
+				if ( p.isAbsolute() ) {
+					normalized = p.toAbsolutePath().normalize().toString();
+				}
+			} catch ( Exception e ) {
+				// Path may be a remote path format, just normalize separators
 			}
-		} catch ( Exception e ) {
-			// Path may be a remote path format, just normalize separators
 		}
 
 		// Replace backslashes with forward slashes

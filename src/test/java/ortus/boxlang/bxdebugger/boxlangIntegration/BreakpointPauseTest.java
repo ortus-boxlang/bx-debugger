@@ -141,7 +141,7 @@ public class BreakpointPauseTest {
 			// Set a breakpoint on line 6 (the return statement in the add function)
 			SetBreakpointsArguments	breakpointArgs			= new SetBreakpointsArguments();
 			Source					source					= new Source();
-			Path					breakpointPauseTestFile	= Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/breakpoint-pause-test.bxs" )
+			Path					breakpointPauseTestFile	= Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/breakpoint-pause-test.bxs" )
 			    .toAbsolutePath();
 			assertTrue( breakpointPauseTestFile.toFile().exists(), "breakpoint-pause-test.bxs should exist" );
 

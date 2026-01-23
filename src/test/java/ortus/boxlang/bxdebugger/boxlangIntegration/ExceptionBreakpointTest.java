@@ -156,8 +156,8 @@ public class ExceptionBreakpointTest {
 			LOGGER.info( "Exception breakpoints enabled, launching program..." );
 
 			// Launch the exception-test.bxs program which should throw an exception
-			Path exceptionTestFile = Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/exception-test.bxs" )
-			    .toAbsolutePath();
+		Path exceptionTestFile = Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/exception-test.bxs" )
+		    .toAbsolutePath();
 			assertTrue( exceptionTestFile.toFile().exists(), "exception-test.bxs should exist" );
 
 			Map<String, Object> launchArgs = new HashMap<>();
