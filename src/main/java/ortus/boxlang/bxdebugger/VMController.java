@@ -119,6 +119,8 @@ public class VMController {
 	private volatile long													sessionStartTime				= 0;
 	// Track if first boxgenerated class has been seen (for timing)
 	private volatile boolean												firstBoxGeneratedClassSeen		= false;
+	// Track targeted ClassPrepareRequests for files with breakpoints (keyed by normalized file path)
+	private final Map<String, ClassPrepareRequest>							targetedClassPrepareRequests	= new ConcurrentHashMap<>();
 
 	/**
 	 * Set the session start time for timing instrumentation
@@ -545,31 +547,145 @@ public class VMController {
 			return;
 		}
 
-		LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
+			LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 
+		// General listener for all boxgenerated classes with SUSPEND_NONE for performance
+		// This is used for logging and tracking class loads, but does NOT suspend
+		// Targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD are created for files with breakpoints
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
-		// Filter for BoxLang generated classes only for efficiency
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
-		// Use SUSPEND_NONE for better performance - we don't need the thread suspended
-		// to set breakpoints, we just need to be notified when classes are loaded
 		classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		classPrepareRequest.enable();
 		LOGGER.info( "Set up class prepare events for boxgenerated.* classes (SUSPEND_NONE)" );
 
+		// Create targeted ClassPrepareRequests for any pending breakpoints
+		// These use SUSPEND_EVENT_THREAD to ensure we can set breakpoints before code executes
+		for ( String filePath : pendingBreakpointsByFile.keySet() ) {
+			createTargetedClassPrepareRequest( filePath );
+		}
+
 		// Also listen for BoxRuntimeException class loading (for deferred exception breakpoints)
-		// SUSPEND_NONE since we just store the reference
 		ClassPrepareRequest exceptionClassPrepareRequest = requestManager.createClassPrepareRequest();
 		exceptionClassPrepareRequest.addClassFilter( BOX_RUNTIME_EXCEPTION_CLASS );
 		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		exceptionClassPrepareRequest.enable();
 
 		// Listen for DebuggerService class loading to store reference
-		// SUSPEND_NONE since we just store the reference and start lazily
 		ClassPrepareRequest debuggerServicePrepareRequest = requestManager.createClassPrepareRequest();
 		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
 		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		debuggerServicePrepareRequest.enable();
+	}
+
+	/**
+	 * Create a targeted ClassPrepareRequest for a specific file path.
+	 * This uses SUSPEND_EVENT_THREAD to ensure breakpoints can be set before code executes.
+	 * The class filter pattern is derived from the file path.
+	 *
+	 * @param filePath The source file path to create a targeted request for
+	 */
+	private void createTargetedClassPrepareRequest( String filePath ) {
+		if ( vm == null ) {
+			return;
+		}
+
+		// Don't create duplicate requests for the same file
+		if ( targetedClassPrepareRequests.containsKey( filePath ) ) {
+			return;
+		}
+
+		String classPattern = filePathToClassPattern( filePath );
+		if ( classPattern == null ) {
+			return;
+		}
+
+		EventRequestManager		requestManager	= vm.eventRequestManager();
+		ClassPrepareRequest		request			= requestManager.createClassPrepareRequest();
+		request.addClassFilter( classPattern );
+		request.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		request.enable();
+
+		targetedClassPrepareRequests.put( filePath, request );
+		LOGGER.info( "Created targeted ClassPrepareRequest for " + filePath + " with pattern: " + classPattern );
+	}
+
+	/**
+	 * Remove a targeted ClassPrepareRequest when all breakpoints for a file are removed.
+	 *
+	 * @param filePath The source file path to remove the targeted request for
+	 */
+	private void removeTargetedClassPrepareRequest( String filePath ) {
+		ClassPrepareRequest request = targetedClassPrepareRequests.remove( filePath );
+		if ( request != null && vm != null ) {
+			try {
+				request.disable();
+				vm.eventRequestManager().deleteEventRequest( request );
+				LOGGER.fine( "Removed targeted ClassPrepareRequest for " + filePath );
+			} catch ( Exception e ) {
+				LOGGER.fine( "Error removing targeted ClassPrepareRequest: " + e.getMessage() );
+			}
+		}
+	}
+
+	/**
+	 * Convert a file path to a BoxLang class pattern for ClassPrepareRequest filtering.
+	 * BoxLang generates class names like:
+	 *   boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
+	 *
+	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/Main.bxs)
+	 * @return A class pattern for matching (e.g., boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main*)
+	 */
+	private String filePathToClassPattern( String filePath ) {
+		if ( filePath == null || filePath.isEmpty() ) {
+			return null;
+		}
+
+		// Normalize path separators
+		String normalizedPath = filePath.replace( "\\", "/" );
+
+		// Remove leading slash if present
+		if ( normalizedPath.startsWith( "/" ) ) {
+			normalizedPath = normalizedPath.substring( 1 );
+		}
+
+		// Remove file extension (.bxs, .bxm, .bx, .cfc, .cfm, .cfs)
+		int dotIndex = normalizedPath.lastIndexOf( '.' );
+		if ( dotIndex > 0 ) {
+			String extension = normalizedPath.substring( dotIndex ).toLowerCase();
+			if ( extension.equals( ".bxs" ) || extension.equals( ".bxm" ) || extension.equals( ".bx" ) ||
+			    extension.equals( ".cfc" ) || extension.equals( ".cfm" ) || extension.equals( ".cfs" ) ) {
+				normalizedPath = normalizedPath.substring( 0, dotIndex );
+			}
+		}
+
+		// Convert path to BoxLang class pattern:
+		// - Replace / with .
+		// - Replace - with __
+		// - Prefix with boxgenerated.templates.
+		// - Add wildcard at end to match inner classes
+		String classPattern = normalizedPath
+		    .replace( "/", "." )
+		    .replace( "-", "__" )
+		    .toLowerCase();
+
+		return "boxgenerated.templates." + classPattern + "*";
+	}
+
+	/**
+	 * Check if there are any verified breakpoints for a given file path.
+	 *
+	 * @param filePath The file path to check
+	 * @return true if there are verified breakpoints for this file
+	 */
+	private boolean hasVerifiedBreakpointsForFile( String filePath ) {
+		String normalizedPath = normalizeFilePath( filePath );
+		for ( VerifiedBreakpointInfo verified : verifiedBreakpoints.values() ) {
+			if ( normalizeFilePath( verified.getFilePath() ).equals( normalizedPath ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1991,6 +2107,10 @@ public class VMController {
 		// Store by ID for quick lookup when client references breakpoint
 		pendingBreakpointsById.put( breakpoint.getId(), pending );
 
+		// Create a targeted ClassPrepareRequest for this file if VM is available
+		// This ensures we suspend when this file's class loads so we can set breakpoints
+		createTargetedClassPrepareRequest( filePath );
+
 		LOGGER.info( "Stored pending breakpoint: " + pending );
 	}
 
@@ -2021,6 +2141,11 @@ public class VMController {
 				fileBreakpoints.remove( pending );
 				if ( fileBreakpoints.isEmpty() ) {
 					pendingBreakpointsByFile.remove( filePath );
+					// Remove the targeted ClassPrepareRequest if no more breakpoints for this file
+					// But only if there are no verified breakpoints for this file either
+					if ( !hasVerifiedBreakpointsForFile( filePath ) ) {
+						removeTargetedClassPrepareRequest( filePath );
+					}
 				}
 			}
 			LOGGER.info( "Removed pending breakpoint: " + pending );
