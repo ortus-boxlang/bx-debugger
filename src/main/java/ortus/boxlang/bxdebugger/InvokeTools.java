@@ -268,7 +268,7 @@ public class InvokeTools {
 	private static ClassType getHelperClass( VMController vmController ) {
 		// First, get the class type (either from cache or by looking it up)
 		ClassType debuggerServiceClass = vmController.getDebuggerServiceClass();
-		
+
 		if ( debuggerServiceClass == null ) {
 			LOGGER.warning( "DebuggerService class not loaded yet" );
 			return null;
@@ -307,14 +307,14 @@ public class InvokeTools {
 	private static ThreadReference findSuspendedThread( VMController vmController ) {
 		// First look for any suspended thread that isn't the debugger invoker/worker
 		for ( ThreadReference thread : vmController.vm.allThreads() ) {
-			if ( thread.isSuspended() && 
-					!thread.name().equals( "BoxLang-DebuggerInvoker" ) && 
-					!thread.name().equals( "BoxLang-DebuggerWorker" ) ) {
+			if ( thread.isSuspended() &&
+			    !thread.name().equals( "BoxLang-DebuggerInvoker" ) &&
+			    !thread.name().equals( "BoxLang-DebuggerWorker" ) ) {
 				LOGGER.fine( "Found suspended thread for DebuggerService start: " + thread.name() );
 				return thread;
 			}
 		}
-		
+
 		// Fall back to main thread if it's suspended
 		for ( ThreadReference thread : vmController.vm.allThreads() ) {
 			if ( thread.name().equals( "main" ) && thread.isSuspended() ) {
@@ -322,7 +322,7 @@ public class InvokeTools {
 				return thread;
 			}
 		}
-		
+
 		return null;
 	}
 }

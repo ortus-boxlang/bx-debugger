@@ -548,7 +548,7 @@ public class VMController {
 	 * This is called when the DebuggerService class is loaded (via ClassPrepareEvent).
 	 * The service creates the invoker and worker threads needed for JDI method invocations.
 	 *
-	 * @param thread           The suspended thread from the ClassPrepareEvent
+	 * @param thread               The suspended thread from the ClassPrepareEvent
 	 * @param debuggerServiceClass The DebuggerService class type
 	 */
 	/**
@@ -556,7 +556,7 @@ public class VMController {
 	 * This is called when we need to invoke methods via JDI and the service hasn't been started yet.
 	 * Must be called from a properly suspended thread context.
 	 *
-	 * @param thread           The suspended thread from the ClassPrepareEvent
+	 * @param thread               The suspended thread from the ClassPrepareEvent
 	 * @param debuggerServiceClass The DebuggerService class type
 	 */
 	private void startDebuggerService( ThreadReference thread, ClassType debuggerServiceClass ) {
@@ -599,6 +599,7 @@ public class VMController {
 	 * It uses the provided suspended thread to start the service.
 	 *
 	 * @param thread A properly suspended thread reference
+	 * 
 	 * @return true if the service is started or was already started
 	 */
 	public boolean ensureDebuggerServiceStarted( ThreadReference thread ) {
@@ -1069,7 +1070,7 @@ public class VMController {
 	public void signalConfigurationDone() {
 		LOGGER.info( "Configuration done signaled" );
 		configurationDone = true;
-		
+
 		// If VMStartEvent was already received and we were waiting for configuration,
 		// now we can resume the VM
 		if ( vmStartEventReceived && vm != null ) {
@@ -1131,8 +1132,8 @@ public class VMController {
 					} else if ( event instanceof ExceptionEvent ee ) {
 						handleExceptionEvent( ee );
 					} else if ( event instanceof VMStartEvent ) {
-						vmStartEventReceived = true;
-						vmStartEventSet = eventSet;  // Store the eventSet for later resume
+						vmStartEventReceived	= true;
+						vmStartEventSet			= eventSet;  // Store the eventSet for later resume
 						// Only resume VM if configurationDone has been received
 						// This follows the proper DAP flow where the client sets breakpoints first
 						if ( configurationDone ) {

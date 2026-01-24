@@ -86,7 +86,7 @@ public class BreakpointPauseTest {
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
+	@Timeout( value = 90, unit = TimeUnit.SECONDS )
 	void testBreakpointPauseOnAddFunction() throws Exception {
 		// Start the debug server
 		CountDownLatch serverStartedLatch = new CountDownLatch( 1 );

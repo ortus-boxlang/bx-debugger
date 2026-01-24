@@ -153,10 +153,10 @@ public class OutputTest {
 			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-		// Wait up to 60 seconds for expected output to appear (BoxLang initialization is slow)
-		String	expected	= "this is the outputx";
-		long	start		= System.currentTimeMillis();
-		while ( System.currentTimeMillis() - start < 60_000 ) {
+			// Wait up to 60 seconds for expected output to appear (BoxLang initialization is slow)
+			String	expected	= "this is the outputx";
+			long	start		= System.currentTimeMillis();
+			while ( System.currentTimeMillis() - start < 60_000 ) {
 				if ( outputClient.getCapturedOutput().contains( expected ) ) {
 					break;
 				}

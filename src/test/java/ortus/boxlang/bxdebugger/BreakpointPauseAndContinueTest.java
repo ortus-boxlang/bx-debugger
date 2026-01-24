@@ -170,9 +170,9 @@ public class BreakpointPauseAndContinueTest {
 			CompletableFuture<Void>		configDoneResult	= server.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-		// 5. Wait for stopped event (breakpoint should be hit)
-		LOGGER.info( "Waiting for stopped event from breakpoint..." );
-		boolean stoppedEventReceived = testClient.waitForStoppedEvent( 60, TimeUnit.SECONDS );
+			// 5. Wait for stopped event (breakpoint should be hit)
+			LOGGER.info( "Waiting for stopped event from breakpoint..." );
+			boolean stoppedEventReceived = testClient.waitForStoppedEvent( 60, TimeUnit.SECONDS );
 			assertTrue( stoppedEventReceived, "Should receive stopped event when breakpoint is hit" );
 
 			StoppedEventArguments stoppedEvent = testClient.getStoppedEvent();

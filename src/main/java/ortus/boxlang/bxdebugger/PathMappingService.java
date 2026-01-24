@@ -265,17 +265,17 @@ public class PathMappingService {
 			return "";
 		}
 
-		String normalized = path;
+		String	normalized						= path;
 
 		// Check if this looks like a Windows absolute path (e.g., "C:/code" or "C:\code")
-		boolean looksLikeWindowsAbsolutePath = path.length() >= 2 && 
-			Character.isLetter( path.charAt( 0 ) ) && 
-			( path.charAt( 1 ) == ':' );
+		boolean	looksLikeWindowsAbsolutePath	= path.length() >= 2 &&
+		    Character.isLetter( path.charAt( 0 ) ) &&
+		    ( path.charAt( 1 ) == ':' );
 
 		// Only call toAbsolutePath() for paths that are actually absolute on this OS
 		// Don't call it for Windows-style paths on Unix/macOS
-		boolean isWindows = System.getProperty( "os.name" ).toLowerCase().contains( "win" );
-		
+		boolean	isWindows						= System.getProperty( "os.name" ).toLowerCase().contains( "win" );
+
 		try {
 			Path p = Paths.get( path );
 			// Only convert to absolute if it's truly absolute on this OS

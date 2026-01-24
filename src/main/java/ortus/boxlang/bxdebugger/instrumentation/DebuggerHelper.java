@@ -11,6 +11,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 /**
  * DebuggerHelper
  * <p>
+ * 
  * @deprecated This class is no longer needed. The debugging functionality has been
  *             moved to {@code ortus.boxlang.runtime.services.DebuggerService} which
  *             is built into the BoxLang runtime. The agent loading mechanism has

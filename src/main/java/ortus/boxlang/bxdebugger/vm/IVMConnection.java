@@ -37,30 +37,30 @@ public interface IVMConnection {
 		Logger logger = Logger.getLogger( IVMConnection.class.getName() );
 
 		try {
-			VirtualMachine vm = connection.getVirtualMachine();
+			VirtualMachine		vm		= connection.getVirtualMachine();
 
 			// Find the DebuggerService class
-			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
+			List<ReferenceType>	classes	= vm.classesByName( DEBUGGER_SERVICE_CLASS );
 			if ( classes.isEmpty() ) {
 				logger.warning( "DebuggerService class not found in target VM. "
 				    + "Ensure BoxLang runtime is loaded." );
 				return;
 			}
 
-			ClassType debuggerServiceClass = ( ClassType ) classes.get( 0 );
+			ClassType		debuggerServiceClass	= ( ClassType ) classes.get( 0 );
 
 			// Find the start() method
-			List<Method> startMethods = debuggerServiceClass.methodsByName( "start" );
+			List<Method>	startMethods			= debuggerServiceClass.methodsByName( "start" );
 			if ( startMethods.isEmpty() ) {
 				logger.severe( "DebuggerService.start() method not found" );
 				return;
 			}
 
-			Method startMethod = startMethods.get( 0 );
+			Method			startMethod		= startMethods.get( 0 );
 
 			// Find a thread to use for invocation
 			// We need a suspended thread to invoke methods via JDI
-			ThreadReference invokeThread = findSuitableThread( vm );
+			ThreadReference	invokeThread	= findSuitableThread( vm );
 			if ( invokeThread == null ) {
 				logger.warning( "No suitable thread found to start DebuggerService. "
 				    + "The service will start automatically when the invoker thread is needed." );
