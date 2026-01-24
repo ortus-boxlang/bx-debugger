@@ -85,6 +85,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IVMConnection									vmConnection			= null;
 	private boolean											falseExit				= false;
 
+	// Timing instrumentation
+	private long											sessionStartTime		= 0;
+
 	public BoxDebugServer() {
 		parseFalseExitProperty();
 	}
@@ -93,8 +96,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Connect to the language client
 	 */
 	public void connect( IDebugProtocolClient client ) {
-		this.client = client;
+		this.client				= client;
+		this.sessionStartTime	= System.currentTimeMillis();
 		LOGGER.info( "Connected to debug client" );
+		LOGGER.info( "[TIMING] Session started at T+0ms" );
 	}
 
 	private void parseFalseExitProperty() {
@@ -127,6 +132,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	@Override
 	public CompletableFuture<Capabilities> initialize( InitializeRequestArguments args ) {
 		LOGGER.info( "Initialize request received from client: " + args.getClientName() );
+		LOGGER.info( "[TIMING] Initialize request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 		Capabilities capabilities = new Capabilities();
 		capabilities.setSupportsConfigurationDoneRequest( true );
@@ -180,17 +186,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		LOGGER.info( "Sending capabilities to client" );
 
-		CompletableFuture.supplyAsync( () -> {
-			try {
-				Thread.sleep( 3000 );
-				client.initialized();
-			} catch ( InterruptedException e ) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
-
-			return null;
-		} );
+		// Send initialized event immediately - no delay needed
+		// The client will then send setBreakpoints, configurationDone, etc.
+		CompletableFuture.runAsync( () -> client.initialized() );
 
 		return CompletableFuture.completedFuture( capabilities );
 	}
@@ -255,6 +253,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
+				LOGGER.info( "[TIMING] Launch request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 				configureDebugSettings( args );
 
@@ -265,6 +264,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// This sets up ClassPrepareRequest before the VM is resumed
 				if ( vmController == null ) {
 					vmController = new VMController( vm, client );
+					vmController.setSessionStartTime( sessionStartTime );
 				} else {
 					// Transfer pending breakpoints to a new manager with the VM
 					VMController old = vmController;
@@ -413,6 +413,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// Create a temporary breakpoint manager for pending breakpoint storage
 				// This will be replaced with a proper one when launch() is called
 				vmController = new VMController( null, client );
+				vmController.setSessionStartTime( sessionStartTime );
 				LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
 			}
 
@@ -1007,6 +1008,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		return CompletableFuture.supplyAsync( () -> {
 
 			LOGGER.info( "Configuration done request received" );
+			LOGGER.info( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 			// Set actual breakpoints for all pending breakpoints
 			verifyAndSetPendingBreakpoints();

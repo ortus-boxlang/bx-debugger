@@ -115,6 +115,24 @@ public class VMController {
 	private volatile boolean												vmStartEventReceived			= false;
 	// Store the VMStartEvent's eventSet so we can resume it when configurationDone is called
 	private volatile EventSet												vmStartEventSet					= null;
+	// Session start time for timing instrumentation
+	private volatile long													sessionStartTime				= 0;
+	// Track if first boxgenerated class has been seen (for timing)
+	private volatile boolean												firstBoxGeneratedClassSeen		= false;
+
+	/**
+	 * Set the session start time for timing instrumentation
+	 */
+	public void setSessionStartTime( long startTime ) {
+		this.sessionStartTime = startTime;
+	}
+
+	/**
+	 * Get elapsed time since session start in ms
+	 */
+	private long getElapsedTime() {
+		return sessionStartTime > 0 ? System.currentTimeMillis() - sessionStartTime : 0;
+	}
 
 	/**
 	 * Information about a verified breakpoint that was successfully set.
@@ -310,6 +328,9 @@ public class VMController {
 		// Transfer configurationDone state - this is critical because configurationDone
 		// may have been signaled before the VM was ready
 		this.configurationDone = old.configurationDone;
+
+		// Transfer session start time for timing instrumentation
+		this.sessionStartTime = old.sessionStartTime;
 
 		if ( vm != null ) {
 			setupClassPrepareEvents();
@@ -893,6 +914,49 @@ public class VMController {
 	}
 
 	/**
+	 * Try to set a breakpoint on a specific class (fast path for ClassPrepareEvent).
+	 * This avoids the expensive vm.allClasses() call by checking only the newly loaded class.
+	 *
+	 * @param refType      The specific class to check
+	 * @param breakpointId unique ID for this breakpoint
+	 * @param filePath     source file path
+	 * @param lineNumber   line number in source
+	 * @param condition    optional condition expression (may be null)
+	 * @param hitCondition optional hit count condition (may be null)
+	 * @param logMessage   optional log message for logpoints (may be null)
+	 *
+	 * @return true if breakpoint was set on this class
+	 */
+	private boolean trySetBreakpointOnSpecificClass( ReferenceType refType, int breakpointId, String filePath,
+	    int lineNumber, String condition, String hitCondition, String logMessage ) {
+		// Only check boxgenerated classes
+		if ( !refType.name().startsWith( "boxgenerated" ) ) {
+			return false;
+		}
+
+		try {
+			List<Location> locations = refType.locationsOfLine( lineNumber );
+			if ( locations.isEmpty() ) {
+				return false;
+			}
+
+			Location	location	= locations.get( 0 );
+			String		sourceName	= getSourceName( location );
+			String		sourcePath	= getSourcePath( location );
+
+			if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
+				LOGGER.info( "Setting breakpoint on class: " + refType.name() + " at line " + lineNumber );
+				return createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
+			}
+		} catch ( AbsentInformationException e ) {
+			// This class doesn't have debug info
+		} catch ( Exception e ) {
+			LOGGER.fine( "Error checking class " + refType.name() + ": " + e.getMessage() );
+		}
+		return false;
+	}
+
+	/**
 	 * Set the path mapping service for remote debugging support.
 	 * This enables proper path translation between local and remote paths.
 	 *
@@ -1079,6 +1143,7 @@ public class VMController {
 		// now we can resume the VM
 		if ( vmStartEventReceived && vm != null ) {
 			LOGGER.info( "Resuming VM after configurationDone" );
+			LOGGER.info( "[TIMING] VM resumed at T+" + getElapsedTime() + "ms" );
 			try {
 				// First resume via the EventSet if we have one stored
 				if ( vmStartEventSet != null ) {
@@ -1344,6 +1409,7 @@ public class VMController {
 
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
+				LOGGER.info( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
 			}
 
 		} catch ( Exception e ) {
@@ -1758,13 +1824,18 @@ public class VMController {
 		// Log boxgenerated classes specifically - these are what we care about for breakpoints
 		if ( refType.name().startsWith( "boxgenerated." ) ) {
 			LOGGER.info( "BoxLang generated class loaded: " + refType.name() );
+			if ( !firstBoxGeneratedClassSeen ) {
+				firstBoxGeneratedClassSeen = true;
+				LOGGER.info( "[TIMING] First boxgenerated class at T+" + getElapsedTime() + "ms (BoxLang runtime init complete)" );
+			}
 		}
 
-		// Try to set any pending breakpoints for this class
+		// Try to set any pending breakpoints on THIS specific class (fast path - no vm.allClasses() call)
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
 
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber,
+			// Use the fast path that only checks the newly loaded class
+			if ( trySetBreakpointOnSpecificClass( refType, pending.breakpointId, pending.filePath, pending.lineNumber,
 			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
 				toRemove.add( pending );
 				LOGGER.fine( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
