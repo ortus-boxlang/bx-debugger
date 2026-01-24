@@ -85,6 +85,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IVMConnection									vmConnection			= null;
 	private boolean											falseExit				= false;
 
+	// Track launch completion for coordinating with configurationDone
+	private volatile CompletableFuture<Void>				launchFuture			= null;
+
 	// Timing instrumentation
 	private long											sessionStartTime		= 0;
 
@@ -249,7 +252,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<Void> launch( Map<String, Object> args ) {
-		return CompletableFuture.supplyAsync( () -> {
+		// Create a future to track when launch is complete
+		// configurationDone will wait for this to ensure VM is ready
+		CompletableFuture<Void> future = CompletableFuture.supplyAsync( () -> {
 			try {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
@@ -289,17 +294,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 				this.variableManager = new VariableManager( vmController );
 
-				// client.initialized();
-
+				LOGGER.info( "Launch completed successfully, VM is ready" );
 				return null;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
 				e.printStackTrace();
 				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
+				throw new RuntimeException( "Launch failed", e );
 			}
-
-			return null;
 		} );
+
+		this.launchFuture = future;
+		return future;
 	}
 
 	/**
@@ -1009,6 +1015,19 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			LOGGER.info( "Configuration done request received" );
 			LOGGER.info( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+
+			// Wait for launch to complete before processing configurationDone
+			// This ensures the VM is ready before we try to set breakpoints
+			if ( launchFuture != null ) {
+				try {
+					LOGGER.info( "Waiting for launch to complete before processing configurationDone..." );
+					launchFuture.get( 30, java.util.concurrent.TimeUnit.SECONDS );
+					LOGGER.info( "Launch completed, continuing with configurationDone" );
+				} catch ( Exception e ) {
+					LOGGER.severe( "Failed waiting for launch to complete: " + e.getMessage() );
+					// Continue anyway - the VM might be available
+				}
+			}
 
 			// Set actual breakpoints for all pending breakpoints
 			verifyAndSetPendingBreakpoints();

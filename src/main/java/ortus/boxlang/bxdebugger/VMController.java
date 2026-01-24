@@ -633,7 +633,12 @@ public class VMController {
 	 * BoxLang generates class names like:
 	 *   boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
 	 *
-	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/Main.bxs)
+	 * BoxLang naming conventions:
+	 * - Directory components are lowercased
+	 * - Filename has its first letter capitalized
+	 * - Hyphens are replaced with double underscores
+	 *
+	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/main.bxs)
 	 * @return A class pattern for matching (e.g., boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main*)
 	 */
 	private String filePathToClassPattern( String filePath ) {
@@ -649,27 +654,41 @@ public class VMController {
 			normalizedPath = normalizedPath.substring( 1 );
 		}
 
-		// Remove file extension (.bxs, .bxm, .bx, .cfc, .cfm, .cfs)
-		int dotIndex = normalizedPath.lastIndexOf( '.' );
+		// Split into directory and filename
+		// BoxLang lowercases directory components but preserves filename case
+		int lastSlash = normalizedPath.lastIndexOf( '/' );
+		String directory = lastSlash > 0 ? normalizedPath.substring( 0, lastSlash ) : "";
+		String filename = lastSlash > 0 ? normalizedPath.substring( lastSlash + 1 ) : normalizedPath;
+
+		// Remove file extension from filename (.bxs, .bxm, .bx, .cfc, .cfm, .cfs)
+		int dotIndex = filename.lastIndexOf( '.' );
 		if ( dotIndex > 0 ) {
-			String extension = normalizedPath.substring( dotIndex ).toLowerCase();
+			String extension = filename.substring( dotIndex ).toLowerCase();
 			if ( extension.equals( ".bxs" ) || extension.equals( ".bxm" ) || extension.equals( ".bx" ) ||
 			    extension.equals( ".cfc" ) || extension.equals( ".cfm" ) || extension.equals( ".cfs" ) ) {
-				normalizedPath = normalizedPath.substring( 0, dotIndex );
+				filename = filename.substring( 0, dotIndex );
 			}
 		}
 
-		// Convert path to BoxLang class pattern:
-		// - Replace / with .
-		// - Replace - with __
-		// - Prefix with boxgenerated.templates.
-		// - Add wildcard at end to match inner classes
-		String classPattern = normalizedPath
+		// Convert directory to lowercase, replace / with . and - with __
+		// BoxLang lowercases directory components in generated class names
+		String directoryPattern = directory
 		    .replace( "/", "." )
 		    .replace( "-", "__" )
 		    .toLowerCase();
 
-		return "boxgenerated.templates." + classPattern + "*";
+		// Filename: capitalize first letter (BoxLang does this), replace - with __
+		// BoxLang capitalizes the first letter of the filename in generated class names
+		String filenamePattern = filename.replace( "-", "__" );
+		if ( !filenamePattern.isEmpty() ) {
+			filenamePattern = Character.toUpperCase( filenamePattern.charAt( 0 ) ) + filenamePattern.substring( 1 );
+		}
+
+		// Combine: boxgenerated.templates.<directory>.<Filename>*
+		if ( directoryPattern.isEmpty() ) {
+			return "boxgenerated.templates." + filenamePattern + "*";
+		}
+		return "boxgenerated.templates." + directoryPattern + "." + filenamePattern + "*";
 	}
 
 	/**
