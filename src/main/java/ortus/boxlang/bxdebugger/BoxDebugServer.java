@@ -180,9 +180,17 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		LOGGER.info( "Sending capabilities to client" );
 
-		// Send initialized event immediately after capabilities
-		// The client will then send setBreakpoints, configurationDone, etc.
-		CompletableFuture.runAsync( () -> client.initialized() );
+		CompletableFuture.supplyAsync( () -> {
+			try {
+				Thread.sleep( 3000 );
+				client.initialized();
+			} catch ( InterruptedException e ) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
+			return null;
+		} );
 
 		return CompletableFuture.completedFuture( capabilities );
 	}
@@ -360,10 +368,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
 			String line;
 			while ( ( line = reader.readLine() ) != null ) {
-				LOGGER.fine( "Output from " + category + ": " + line );
+				LOGGER.info( "Output from " + category + ": " + line );
 				sendOutput( line, category );
 			}
-			LOGGER.fine( "Monitor for " + category + " stream ended (stream closed)" );
+			LOGGER.info( "Monitor for " + category + " stream ended (stream closed)" );
 		} catch ( IOException e ) {
 			LOGGER.warning( "Error reading from " + category + " stream: " + e.getMessage() );
 		}
@@ -1084,6 +1092,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 						dapThreads.add( dapThread );
 
 						LOGGER.fine( "Added thread: ID=" + dapThread.getId() + ", Name=" + dapThread.getName() );
+						// Emit names at INFO to help diagnose presence of our exec thread during tests
+						LOGGER.info( "Thread present: ID=" + dapThread.getId() + ", Name='" + dapThread.getName() + "'" );
 
 					} catch ( Exception e ) {
 						LOGGER.warning( "Error processing thread " + jdiThread.uniqueID() + ": " + e.getMessage() );

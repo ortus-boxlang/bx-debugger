@@ -83,8 +83,6 @@ public class VMController {
 	private MethodEntryRequest												methodEntryRequestDebugger		= null;
 	private CompletableFuture<Void>											debugFuture						= null;
 	private ThreadReference													debugThread						= null;
-	// Cached reference to the debugger worker thread for performance
-	private volatile ThreadReference										cachedWorkerThread				= null;
 
 	// Exception breakpoint support
 	private static final String												BOX_RUNTIME_EXCEPTION_CLASS		= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
@@ -308,6 +306,10 @@ public class VMController {
 		}
 
 		this.setExceptionBreakpoints( old.caughtExceptionsEnabled, old.uncaughtExceptionsEnabled );
+
+		// Transfer configurationDone state - this is critical because configurationDone
+		// may have been signaled before the VM was ready
+		this.configurationDone = old.configurationDone;
 
 		if ( vm != null ) {
 			setupClassPrepareEvents();
@@ -806,39 +808,6 @@ public class VMController {
 	}
 
 	/**
-	 * Try to match a specific class for a breakpoint at the given file and line.
-	 * This is a fast-path optimization to avoid iterating all classes.
-	 *
-	 * @param refType    the class to check
-	 * @param filePath   source file path
-	 * @param lineNumber line number in source
-	 *
-	 * @return the matching Location, or null if no match
-	 */
-	private Location tryMatchClassForBreakpoint( ReferenceType refType, String filePath, int lineNumber ) {
-		try {
-			List<Location> locations = refType.locationsOfLine( lineNumber );
-			if ( locations.isEmpty() ) {
-				return null;
-			}
-
-			Location	location	= locations.get( 0 );
-			String		sourceName	= getSourceName( location );
-			String		sourcePath	= getSourcePath( location );
-
-			if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-				LOGGER.fine( "Matched class " + refType.name() + " for breakpoint at " + filePath + ":" + lineNumber );
-				return location;
-			}
-		} catch ( AbsentInformationException e ) {
-			// This class doesn't have debug info
-		} catch ( Exception e ) {
-			LOGGER.fine( "Error matching class " + refType.name() + ": " + e.getMessage() );
-		}
-		return null;
-	}
-
-	/**
 	 * Try to set a breakpoint on an already loaded class
 	 *
 	 * @param breakpointId unique ID for this breakpoint
@@ -852,24 +821,6 @@ public class VMController {
 	 */
 	private boolean trySetBreakpointOnLoadedClass( int breakpointId, String filePath, int lineNumber,
 	    String condition, String hitCondition, String logMessage ) {
-		return trySetBreakpointOnLoadedClass( breakpointId, filePath, lineNumber, condition, hitCondition, logMessage, null );
-	}
-
-	/**
-	 * Try to set a breakpoint on an already loaded class, optionally checking a specific class first.
-	 *
-	 * @param breakpointId   unique ID for this breakpoint
-	 * @param filePath       source file path
-	 * @param lineNumber     line number in source
-	 * @param condition      optional condition expression (may be null)
-	 * @param hitCondition   optional hit count condition (may be null)
-	 * @param logMessage     optional log message for logpoints (may be null)
-	 * @param candidateClass optional class to try first (from ClassPrepareEvent), may be null
-	 *
-	 * @return true if breakpoint was set on a loaded class
-	 */
-	private boolean trySetBreakpointOnLoadedClass( int breakpointId, String filePath, int lineNumber,
-	    String condition, String hitCondition, String logMessage, ReferenceType candidateClass ) {
 		// Require VM to be available
 		if ( vm == null ) {
 			LOGGER.fine( "VM is null, cannot search for loaded classes" );
@@ -878,24 +829,11 @@ public class VMController {
 
 		LOGGER.fine( "Searching for loaded class matching " + filePath + ":" + lineNumber );
 
-		// If we have a candidate class from ClassPrepareEvent, try it first (fast path)
-		if ( candidateClass != null && candidateClass.name().startsWith( "boxgenerated" ) ) {
-			Location matchedLocation = tryMatchClassForBreakpoint( candidateClass, filePath, lineNumber );
-			if ( matchedLocation != null ) {
-				LOGGER.info( "Setting breakpoint on class: " + candidateClass.name() + " at line " + lineNumber );
-				return createBreakpointRequest( breakpointId, matchedLocation, filePath, lineNumber, condition, hitCondition, logMessage );
-			}
-		}
-
-		// Fall back to searching all boxgenerated classes (slow path)
-		// Use vm.classesByName with prefix filter for better performance
+		// Get all loaded classes that might contain this file
 		List<ReferenceType> classes;
 		try {
-			// Get only boxgenerated classes - this is much faster than vm.allClasses()
-			classes = vm.allClasses().stream()
-			    .filter( c -> c.name().startsWith( "boxgenerated" ) )
-			    .toList();
-			LOGGER.fine( "Found " + classes.size() + " boxgenerated classes to search" );
+			classes = vm.allClasses();
+			LOGGER.fine( "Found " + classes.size() + " loaded classes to search" );
 		} catch ( Exception e ) {
 			LOGGER.warning( "Error getting loaded classes: " + e.getMessage() );
 			return false;
@@ -907,14 +845,37 @@ public class VMController {
 
 		for ( ReferenceType refType : classes ) {
 			try {
-				// Try to find the location for this line in this class
-				Location matchedLocation = tryMatchClassForBreakpoint( refType, filePath, lineNumber );
-				if ( matchedLocation != null ) {
-					bestMatch			= refType;
-					bestMatchLocation	= matchedLocation;
-					LOGGER.fine( "Found matching boxgenerated class: " + refType.name() );
-					// Don't break - keep looking for potentially newer versions
+				// Skip non-BoxLang classes for performance
+				String className = refType.name();
+				if ( !className.startsWith( "boxgenerated" ) ) {
+					continue;
 				}
+
+				// Try to find the location for this line in this class
+				List<Location> locations = refType.locationsOfLine( lineNumber );
+
+				if ( !locations.isEmpty() ) {
+					// Check if this location corresponds to our file
+					Location	location	= locations.get( 0 );
+					String		sourceName	= getSourceName( location );
+					String		sourcePath	= getSourcePath( location );
+
+					LOGGER.fine( "Found location at " + sourceName + " (path: " + sourcePath + ") :" + lineNumber + " in class " + className );
+
+					// Use intelligent path matching that handles:
+					// 1. Full path match (sourcePath == filePath)
+					// 2. Filename-only match (sourceName == filename from filePath)
+					// 3. Suffix match (filePath ends with sourcePath or vice versa)
+					if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
+						bestMatch			= refType;
+						bestMatchLocation	= location;
+						LOGGER.fine( "Found matching boxgenerated class: " + className );
+						// Don't break - keep looking for potentially newer versions
+					}
+				}
+			} catch ( AbsentInformationException e ) {
+				// This class doesn't have debug info, skip it
+				continue;
 			} catch ( Exception e ) {
 				LOGGER.fine( "Error checking class " + refType.name() + ": " + e.getMessage() );
 				continue;
@@ -926,7 +887,7 @@ public class VMController {
 			return createBreakpointRequest( breakpointId, bestMatchLocation, filePath, lineNumber, condition, hitCondition, logMessage );
 		}
 
-		LOGGER.fine( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
+		LOGGER.info( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
 		return false;
 
 	}
@@ -1231,8 +1192,15 @@ public class VMController {
 					LOGGER.fine( "Not resuming event set - waiting for continue request" );
 				}
 
-				// Resume helper thread if present and suspended (use cached reference)
-				resumeWorkerThreadIfNeeded();
+				// Resume helper thread if present and suspended
+				vm.allThreads().stream()
+				    .filter( t -> t.name().equalsIgnoreCase( "BoxLang-DebuggerWorker" ) )
+				    .findFirst()
+				    .ifPresent( helperThread -> {
+					    if ( helperThread.isSuspended() ) {
+						    helperThread.resume();
+					    }
+				    } );
 				// If shouldResume is false (breakpoint hit), the thread stays suspended
 				// until the debugger client sends a continue/step request
 
@@ -1246,75 +1214,14 @@ public class VMController {
 		}
 	}
 
-	/**
-	 * Gets the cached invoker thread reference, finding it if not cached.
-	 * Uses caching to avoid repeated vm.allThreads() calls.
-	 * 
-	 * @return The invoker thread reference, or null if not found
-	 */
 	public ThreadReference getDebugThread() {
-		// Check if cached reference is still valid
-		if ( debugThread != null ) {
-			try {
-				// Verify the thread still exists by checking its status
-				debugThread.status();
-				return debugThread;
-			} catch ( Exception e ) {
-				// Thread no longer valid, clear cache
-				debugThread = null;
-			}
-		}
-
-		// Find and cache the invoker thread
 		for ( ThreadReference ref : vm.allThreads() ) {
 			if ( ref.name().equals( "BoxLang-DebuggerInvoker" ) ) {
-				debugThread = ref;
 				return ref;
 			}
 		}
 
 		return null;
-	}
-
-	/**
-	 * Gets the cached worker thread reference, finding it if not cached.
-	 * Uses caching to avoid repeated vm.allThreads() calls in the event loop.
-	 * 
-	 * @return The worker thread reference, or null if not found
-	 */
-	private ThreadReference getWorkerThread() {
-		// Check if cached reference is still valid
-		if ( cachedWorkerThread != null ) {
-			try {
-				// Verify the thread still exists by checking its status
-				cachedWorkerThread.status();
-				return cachedWorkerThread;
-			} catch ( Exception e ) {
-				// Thread no longer valid, clear cache
-				cachedWorkerThread = null;
-			}
-		}
-
-		// Find and cache the worker thread
-		for ( ThreadReference ref : vm.allThreads() ) {
-			if ( ref.name().equalsIgnoreCase( "BoxLang-DebuggerWorker" ) ) {
-				cachedWorkerThread = ref;
-				return ref;
-			}
-		}
-
-		return null;
-	}
-
-	/**
-	 * Resumes the debugger worker thread if it's suspended.
-	 * Uses cached thread reference for performance.
-	 */
-	private void resumeWorkerThreadIfNeeded() {
-		ThreadReference workerThread = getWorkerThread();
-		if ( workerThread != null && workerThread.isSuspended() ) {
-			workerThread.resume();
-		}
 	}
 
 	private void handleMethodEntryEvent( MethodEntryEvent event ) {
@@ -1854,12 +1761,11 @@ public class VMController {
 		}
 
 		// Try to set any pending breakpoints for this class
-		// Pass the newly loaded class as a candidate for fast-path matching
 		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
 
 		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
 			if ( trySetBreakpointOnLoadedClass( pending.breakpointId, pending.filePath, pending.lineNumber,
-			    pending.condition, pending.hitCondition, pending.logMessage, refType ) ) {
+			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
 				toRemove.add( pending );
 				LOGGER.fine( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
 			}

@@ -16,7 +16,11 @@
             "request": "launch",
             "mainClass": "ortus.boxlang.bxdebugger.BoxDebugger",
             "projectName": "bx-debugger",
-            "args": "9898"
+            "args": "9898",
+            "classPaths": [
+                "${workspaceFolder}/build/libs/bx-debugger-1.0.0-snapshot.jar",
+                "${workspaceFolder}/../boxlang/build/libs/boxlang-1.10.0-snapshot.jar"
+            ]
         },
         {
             "type": "boxlang",
