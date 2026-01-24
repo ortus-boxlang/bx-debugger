@@ -275,9 +275,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
 				vmController.startEventProcessing();
 
-				// Now load the debug agent, which resumes the VM
-				// This must happen AFTER VMController is created and event processing started
-				IVMConnection.loadDebugAgent( vmConnection );
+				// Note: The DebuggerService will be started automatically when its class is loaded
+				// via the ClassPrepareEvent handler in VMController. We no longer need to call
+				// startDebuggerService here because the class may not be loaded yet at this point.
 
 				// Start output monitoring after VM is resumed
 				startOutputMonitoring();
@@ -364,11 +364,14 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Monitor an output stream and send events to the client
 	 */
 	private void monitorOutputStream( InputStream inputStream, String category ) {
+		LOGGER.info( "Starting monitor for " + category + " stream" );
 		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
 			String line;
 			while ( ( line = reader.readLine() ) != null ) {
+				LOGGER.info( "Output from " + category + ": " + line );
 				sendOutput( line, category );
 			}
+			LOGGER.info( "Monitor for " + category + " stream ended (stream closed)" );
 		} catch ( IOException e ) {
 			LOGGER.warning( "Error reading from " + category + " stream: " + e.getMessage() );
 		}
@@ -1008,7 +1011,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Set actual breakpoints for all pending breakpoints
 			verifyAndSetPendingBreakpoints();
 
-			// Start breakpoint event processing
+			// Start breakpoint event processing (idempotent if already started)
 			vmController.startEventProcessing();
 
 			// Start output monitoring using the VM's process
@@ -1018,36 +1021,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			sessionCleaned = false;
 			startProcessMonitoring();
 
-			// Mark that configuration is complete
-			// In a typical DAP flow, this signals that the client has finished sending
-			// initial configuration requests (like setting breakpoints) and the debugger
-			// can proceed with execution
-
-			// If we have a VM running and breakpoints are set, we can now proceed
-			if ( vm != null && vmController != null ) {
-				LOGGER.info( "Configuration done: VM is running, breakpoints are ready" );
-
-				// Resume execution if the VM is suspended
-				// This is often needed in DAP implementations to continue execution
-				// after initial configuration is complete
-				try {
-					if ( vm.allThreads().stream().anyMatch( thread -> {
-						try {
-							return thread.isSuspended();
-						} catch ( Exception e ) {
-							return false;
-						}
-					} ) ) {
-						LOGGER.info( "Resuming suspended threads after configuration done" );
-						vm.resume();
-					}
-				} catch ( Exception e ) {
-					java.util.logging.Logger.getLogger( BoxDebugServer.class.getName() )
-					    .warning( "Could not resume VM after configuration done: " + e.getMessage() );
-				}
-
-			} else {
-				LOGGER.info( "Configuration done: No active VM yet, configuration will be applied when VM starts" );
+			// Signal to VMController that configuration is complete
+			// This allows the VM to be resumed if it was waiting
+			if ( vmController != null ) {
+				vmController.signalConfigurationDone();
 			}
 
 			LOGGER.info( "Configuration done request completed successfully" );

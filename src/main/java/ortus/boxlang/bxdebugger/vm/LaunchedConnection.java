@@ -52,6 +52,9 @@ public class LaunchedConnection implements IVMConnection {
 
 		arguments.get( "main" ).setValue( command.toString() );
 
+		LOGGER.info( "Launching with options: " + arguments.get( "options" ).value() );
+		LOGGER.info( "Launching with main: " + arguments.get( "main" ).value() );
+
 		// Launch the VM with a couple of quick retries to avoid transient failures
 		final int	maxAttempts	= 3;
 		int			attempt		= 1;

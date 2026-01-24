@@ -37,15 +37,15 @@ dependencies {
 	// Until BoxLang is published to Maven Central
 	// Look for it in the local build directory
 	// You must run `./gradle build -x test` in the BoxLang project
-	// if ( file( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
-	// 	compileOnly files( '../../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
-	// 	testImplementation files( '../../boxlang/build/distributions/boxlang-' + boxlangVersion + '.jar' )
-	// } else {
-    // 	compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
-	// 	testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
-	// }
-	compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
-	testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+	if ( file( '../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' ).exists() ) {
+		compileOnly files( '../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
+		testImplementation files( '../boxlang/build/libs/boxlang-' + boxlangVersion + '.jar' )
+		println "+ Using local BoxLang build: ../boxlang/build/libs/boxlang-${boxlangVersion}.jar"
+	} else {
+		compileOnly files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+		testImplementation files( 'src/test/resources/libs/boxlang-' + boxlangVersion + '.jar' )
+		println "+ Using bundled BoxLang: src/test/resources/libs/boxlang-${boxlangVersion}.jar"
+	}
 
 
 	// LSP4J - Language Server Protocol for Java
@@ -290,16 +290,20 @@ task bumpPatchVersion {
 /**
  * Build a Java Agent JAR with the required manifest entries.
  * Output: build/libs/<project>-<version>-agent.jar
+ *
+ * @deprecated This task is no longer needed as the DebuggerService is now
+ *             built into the BoxLang runtime. The agent loading mechanism
+ *             has been replaced with JDI-based service startup.
  */
 task debugAgentJar(type: Jar) {
 	group = "build"
-	description = "Builds the Java agent JAR with Agent-Class manifest"
+	description = "[DEPRECATED] Builds the Java agent JAR - no longer needed as DebuggerService is in BoxLang runtime"
 	from sourceSets.main.output
 	archiveClassifier = 'agent'
 	manifest {
 		attributes(
 			'Manifest-Version': '1.0',
-			'Agent-Class' : 'ortus.boxlang.moduleslug.instrumentation.DebugAgent',
+			'Agent-Class' : 'ortus.boxlang.bxdebugger.instrumentation.DebugAgent',
 			'Can-Redefine-Classes': 'true',
 			'Can-Retransform-Classes': 'true'
 		)

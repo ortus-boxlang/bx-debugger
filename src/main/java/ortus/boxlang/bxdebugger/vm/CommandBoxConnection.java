@@ -34,7 +34,7 @@ public class CommandBoxConnection implements IVMConnection {
 		this.serverInfo	= parseCommandBoxServerInfo( serverName );
 		this.vm			= attachToVM( serverInfo.host, serverInfo.port );
 
-		IVMConnection.loadDebugAgent( this );
+		IVMConnection.startDebuggerService( this );
 	}
 
 	@Override

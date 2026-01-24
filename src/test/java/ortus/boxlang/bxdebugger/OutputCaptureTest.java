@@ -78,7 +78,7 @@ public class OutputCaptureTest {
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
+	@Timeout( value = 90, unit = TimeUnit.SECONDS )
 	void testOutputCapture() throws Exception {
 		// Start the debug server
 		CountDownLatch serverStartedLatch = new CountDownLatch( 1 );
@@ -150,10 +150,10 @@ public class OutputCaptureTest {
 			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-			// Wait up to 10 seconds for expected output to appear (integration can be slow)
-			String	expected	= "This is output from boxlang";
-			long	start		= System.currentTimeMillis();
-			while ( System.currentTimeMillis() - start < 10_000 ) {
+		// Wait up to 60 seconds for expected output to appear (BoxLang initialization is slow)
+		String	expected	= "This is output from boxlang";
+		long	start		= System.currentTimeMillis();
+		while ( System.currentTimeMillis() - start < 60_000 ) {
 				if ( outputClient.getCapturedOutput().contains( expected ) ) {
 					break;
 				}

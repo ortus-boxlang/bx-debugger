@@ -233,44 +233,6 @@ public class PathMappingService {
 	}
 
 	/**
-	 * Normalize a file path for consistent comparison:
-	 * - Convert to absolute path if possible
-	 * - Replace backslashes with forward slashes
-	 * - Remove trailing slashes
-	 *
-	 * @param path The path to normalize
-	 *
-	 * @return The normalized path, or empty string if null
-	 */
-	public static String normalizePath( String path ) {
-		if ( path == null || path.isEmpty() ) {
-			return "";
-		}
-
-		String normalized = path;
-
-		// Try to convert to absolute path (may fail for remote paths)
-		try {
-			Path p = Paths.get( path );
-			if ( p.isAbsolute() || path.contains( ":" ) ) {
-				normalized = p.toAbsolutePath().normalize().toString();
-			}
-		} catch ( Exception e ) {
-			// Path may be a remote path format, just normalize separators
-		}
-
-		// Replace backslashes with forward slashes
-		normalized = normalized.replace( '\\', '/' );
-
-		// Remove trailing slash
-		while ( normalized.length() > 1 && normalized.endsWith( "/" ) ) {
-			normalized = normalized.substring( 0, normalized.length() - 1 );
-		}
-
-		return normalized;
-	}
-
-	/**
 	 * Extract the filename from a path.
 	 *
 	 * @param path The file path
@@ -291,14 +253,63 @@ public class PathMappingService {
 	}
 
 	/**
-	 * Check if a string starts with a prefix, ignoring case.
+	 * Normalize a path for consistent comparison.
+	 * Converts backslashes to forward slashes, removes trailing slashes.
+	 *
+	 * @param path The path to normalize
+	 *
+	 * @return The normalized path, or empty string if null
+	 */
+	public static String normalizePath( String path ) {
+		if ( path == null || path.isEmpty() ) {
+			return "";
+		}
+
+		String normalized = path;
+
+		// Check if this looks like a Windows absolute path (e.g., "C:/code" or "C:\code")
+		boolean looksLikeWindowsAbsolutePath = path.length() >= 2 && 
+			Character.isLetter( path.charAt( 0 ) ) && 
+			( path.charAt( 1 ) == ':' );
+
+		// Only call toAbsolutePath() for paths that are actually absolute on this OS
+		// Don't call it for Windows-style paths on Unix/macOS
+		boolean isWindows = System.getProperty( "os.name" ).toLowerCase().contains( "win" );
+		
+		try {
+			Path p = Paths.get( path );
+			// Only convert to absolute if it's truly absolute on this OS
+			// (avoid prepending current directory to Windows paths on non-Windows systems)
+			if ( p.isAbsolute() && ( isWindows || !looksLikeWindowsAbsolutePath ) ) {
+				normalized = p.toAbsolutePath().normalize().toString();
+			} else {
+				// Just normalize the path without making it absolute
+				normalized = p.normalize().toString();
+			}
+		} catch ( Exception e ) {
+			// Path may be a remote path format, just normalize separators
+		}
+
+		// Replace backslashes with forward slashes
+		normalized = normalized.replace( '\\', '/' );
+
+		// Remove trailing slash
+		while ( normalized.length() > 1 && normalized.endsWith( "/" ) ) {
+			normalized = normalized.substring( 0, normalized.length() - 1 );
+		}
+
+		return normalized;
+	}
+
+	/**
+	 * Case-insensitive check if a string starts with a prefix.
 	 *
 	 * @param str    The string to check
 	 * @param prefix The prefix to look for
 	 *
 	 * @return true if str starts with prefix (case-insensitive)
 	 */
-	private static boolean startsWithIgnoreCase( String str, String prefix ) {
+	private boolean startsWithIgnoreCase( String str, String prefix ) {
 		if ( str == null || prefix == null ) {
 			return false;
 		}

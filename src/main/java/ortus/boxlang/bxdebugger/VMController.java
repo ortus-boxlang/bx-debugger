@@ -45,6 +45,7 @@ import com.sun.jdi.event.MethodEntryEvent;
 import com.sun.jdi.event.StepEvent;
 import com.sun.jdi.event.VMDeathEvent;
 import com.sun.jdi.event.VMDisconnectEvent;
+import com.sun.jdi.event.VMStartEvent;
 import com.sun.jdi.request.BreakpointRequest;
 import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
@@ -90,6 +91,11 @@ public class VMController {
 	private ExceptionRequest												exceptionRequest				= null;
 	private final Map<Long, ExceptionInfo>									exceptionInfoByThread			= new ConcurrentHashMap<>();
 
+	// DebuggerService support
+	private static final String												DEBUGGER_SERVICE_CLASS			= "ortus.boxlang.runtime.services.DebuggerService";
+	private volatile boolean												debuggerServiceStarted			= false;
+	private volatile ClassType												debuggerServiceClass			= null;
+
 	// Conditional breakpoint support
 	private static final int												CONDITION_EVAL_TIMEOUT_SECONDS	= 30;
 	private final Map<Integer, Integer>										breakpointHitCounts				= new ConcurrentHashMap<>();
@@ -102,6 +108,13 @@ public class VMController {
 	// Verified breakpoints storage - keeps track of breakpoints that have been successfully set
 	// This allows re-applying breakpoints when BoxLang recompiles a class
 	private final Map<Integer, VerifiedBreakpointInfo>						verifiedBreakpoints				= new ConcurrentHashMap<>();
+
+	// Flag to track whether configurationDone has been called
+	// VM should not resume until this is true
+	private volatile boolean												configurationDone				= false;
+	private volatile boolean												vmStartEventReceived			= false;
+	// Store the VMStartEvent's eventSet so we can resume it when configurationDone is called
+	private volatile EventSet												vmStartEventSet					= null;
 
 	/**
 	 * Information about a verified breakpoint that was successfully set.
@@ -312,11 +325,10 @@ public class VMController {
 	public CompletableFuture<Void> pauseDebugThread() {
 		// create other debug thread request
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
-		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
-		LOGGER.info( "Set up method entry request for DebugAgent" );
+		LOGGER.info( "Set up method entry request for DebuggerService" );
 		this.debugFuture = new CompletableFuture<>();
 
 		return this.debugFuture;
@@ -342,19 +354,19 @@ public class VMController {
 	}
 
 	/**
-	 * Ensure the DebuggerHelper threads are ready for condition evaluation.
+	 * Ensure the DebuggerService threads are ready for condition evaluation.
 	 * The worker thread needs to be running to process queued tasks.
 	 */
 	private void ensureDebugHelperThreadsReady() {
 		try {
 			// Resume the worker thread if suspended - it processes the queue
 			vm.allThreads().stream()
-			    .filter( t -> t.name().equalsIgnoreCase( "DebuggerHelper-Worker" ) )
+			    .filter( t -> t.name().equalsIgnoreCase( "BoxLang-DebuggerWorker" ) )
 			    .findFirst()
 			    .ifPresent( workerThread -> {
 				    if ( workerThread.isSuspended() ) {
 					    workerThread.resume();
-					    LOGGER.fine( "Resumed DebuggerHelper-Worker thread for condition evaluation" );
+					    LOGGER.fine( "Resumed BoxLang-DebuggerWorker thread for condition evaluation" );
 				    }
 			    } );
 		} catch ( Exception e ) {
@@ -508,7 +520,9 @@ public class VMController {
 			return;
 		}
 
+		LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
 		EventRequestManager	requestManager		= vm.eventRequestManager();
+
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
 		// Filter for BoxLang generated classes only for efficiency
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
@@ -521,7 +535,119 @@ public class VMController {
 		exceptionClassPrepareRequest.addClassFilter( BOX_RUNTIME_EXCEPTION_CLASS );
 		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		exceptionClassPrepareRequest.enable();
-		LOGGER.info( "Set up class prepare events for BoxRuntimeException" );
+
+		// Listen for DebuggerService class loading to start it
+		ClassPrepareRequest debuggerServicePrepareRequest = requestManager.createClassPrepareRequest();
+		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
+		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		debuggerServicePrepareRequest.enable();
+	}
+
+	/**
+	 * Start the DebuggerService in the target VM.
+	 * This is called when the DebuggerService class is loaded (via ClassPrepareEvent).
+	 * The service creates the invoker and worker threads needed for JDI method invocations.
+	 *
+	 * @param thread           The suspended thread from the ClassPrepareEvent
+	 * @param debuggerServiceClass The DebuggerService class type
+	 */
+	/**
+	 * Start the DebuggerService in the target VM.
+	 * This is called when we need to invoke methods via JDI and the service hasn't been started yet.
+	 * Must be called from a properly suspended thread context.
+	 *
+	 * @param thread           The suspended thread from the ClassPrepareEvent
+	 * @param debuggerServiceClass The DebuggerService class type
+	 */
+	private void startDebuggerService( ThreadReference thread, ClassType debuggerServiceClass ) {
+		if ( debuggerServiceStarted ) {
+			LOGGER.info( "DebuggerService already started" );
+			return;
+		}
+
+		try {
+			// Find the start() method
+			List<com.sun.jdi.Method> startMethods = debuggerServiceClass.methodsByName( "start" );
+			if ( startMethods.isEmpty() ) {
+				LOGGER.severe( "DebuggerService.start() method not found" );
+				return;
+			}
+
+			com.sun.jdi.Method startMethod = startMethods.get( 0 );
+
+			// Invoke DebuggerService.start() on the suspended thread
+			debuggerServiceClass.invokeMethod(
+			    thread,
+			    startMethod,
+			    java.util.Collections.emptyList(),
+			    ObjectReference.INVOKE_SINGLE_THREADED
+			);
+
+			debuggerServiceStarted = true;
+			LOGGER.info( "DebuggerService started successfully in target VM" );
+
+		} catch ( IncompatibleThreadStateException e ) {
+			LOGGER.warning( "Could not start DebuggerService - thread not in compatible state: " + e.getMessage() );
+		} catch ( Exception e ) {
+			LOGGER.warning( "Could not start DebuggerService: " + e.getMessage() );
+		}
+	}
+
+	/**
+	 * Lazily start the DebuggerService when needed.
+	 * This method is called from InvokeTools when we need to invoke methods.
+	 * It uses the provided suspended thread to start the service.
+	 *
+	 * @param thread A properly suspended thread reference
+	 * @return true if the service is started or was already started
+	 */
+	public boolean ensureDebuggerServiceStarted( ThreadReference thread ) {
+		if ( debuggerServiceStarted ) {
+			return true;
+		}
+
+		if ( debuggerServiceClass == null ) {
+			// Try to find the class if it's been loaded
+			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
+			if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
+				debuggerServiceClass = ct;
+			} else {
+				LOGGER.warning( "DebuggerService class not loaded yet" );
+				return false;
+			}
+		}
+
+		startDebuggerService( thread, debuggerServiceClass );
+		return debuggerServiceStarted;
+	}
+
+	/**
+	 * Get the DebuggerService class type if it has been loaded.
+	 *
+	 * @return The ClassType for DebuggerService, or null if not yet loaded
+	 */
+	public ClassType getDebuggerServiceClass() {
+		if ( debuggerServiceClass != null ) {
+			return debuggerServiceClass;
+		}
+
+		// Try to find the class if it's been loaded
+		List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
+		if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
+			debuggerServiceClass = ct;
+			return ct;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Check if the DebuggerService has been started in the target VM.
+	 *
+	 * @return true if the service has been started
+	 */
+	public boolean isDebuggerServiceStarted() {
+		return debuggerServiceStarted;
 	}
 
 	/**
@@ -656,7 +782,7 @@ public class VMController {
 			if ( vm == null ) {
 				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, breakpointId, condition, hitCondition, logMessage ) );
 				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
-				return true;
+				return false; // Return false - breakpoint is not yet verified (VM not running)
 			}
 
 			// Try to set the breakpoint immediately if the class is already loaded
@@ -937,6 +1063,32 @@ public class VMController {
 	}
 
 	/**
+	 * Signal that configurationDone has been received from the client.
+	 * This allows the VM to be resumed if it was waiting for configuration.
+	 */
+	public void signalConfigurationDone() {
+		LOGGER.info( "Configuration done signaled" );
+		configurationDone = true;
+		
+		// If VMStartEvent was already received and we were waiting for configuration,
+		// now we can resume the VM
+		if ( vmStartEventReceived && vm != null ) {
+			LOGGER.info( "Resuming VM after configurationDone" );
+			try {
+				// First resume via the EventSet if we have one stored
+				if ( vmStartEventSet != null ) {
+					vmStartEventSet.resume();
+					vmStartEventSet = null;
+				}
+				// Also call vm.resume() to ensure the VM is fully resumed
+				vm.resume();
+			} catch ( Exception e ) {
+				LOGGER.severe( "Failed to resume VM after configurationDone: " + e.getMessage() );
+			}
+		}
+	}
+
+	/**
 	 * Process JDI events in a loop
 	 */
 	private void processEvents() {
@@ -950,17 +1102,23 @@ public class VMController {
 				EventSet eventSet = eventQueue.remove( 1000 ); // 1 second timeout
 
 				if ( eventSet == null ) {
+					// Check if process is still alive
+					try {
+						if ( vm != null && vm.process() != null && !vm.process().isAlive() ) {
+							LOGGER.warning( "VM process has terminated! Exit value: " + vm.process().exitValue() );
+							eventProcessingActive = false;
+							return;
+						}
+					} catch ( Exception pe ) {
+						LOGGER.warning( "Error checking process status: " + pe.getMessage() );
+					}
 					continue; // Timeout, check if we should continue
 				}
-
-				LOGGER.info( "Received event set with " + eventSet.size() + " events" );
 
 				EventIterator eventIterator = eventSet.eventIterator();
 
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
-
-					LOGGER.info( "Processing event: " + event.getClass().getSimpleName() );
 
 					if ( event instanceof BreakpointEvent be ) {
 						handleBreakpointEvent( be );
@@ -972,6 +1130,22 @@ public class VMController {
 						handleMethodEntryEvent( mee );
 					} else if ( event instanceof ExceptionEvent ee ) {
 						handleExceptionEvent( ee );
+					} else if ( event instanceof VMStartEvent ) {
+						vmStartEventReceived = true;
+						vmStartEventSet = eventSet;  // Store the eventSet for later resume
+						// Only resume VM if configurationDone has been received
+						// This follows the proper DAP flow where the client sets breakpoints first
+						if ( configurationDone ) {
+							LOGGER.info( "VM started and configuration already done, resuming VM" );
+							try {
+								vmStartEventSet.resume();  // Resume the eventSet, not just the VM
+								vmStartEventSet = null;
+							} catch ( Exception e ) {
+								LOGGER.severe( "Failed to resume VM after VMStartEvent: " + e.getMessage() );
+							}
+						} else {
+							LOGGER.info( "VM started, waiting for configurationDone before resuming" );
+						}
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
 						eventProcessingActive = false;
@@ -982,6 +1156,7 @@ public class VMController {
 				// Only resume for non-breakpoint events
 				// For breakpoint events, the thread should remain suspended until continue is called
 				boolean			shouldResume	= true;
+				boolean			isVMStartEvent	= false;
 				EventIterator	iter			= eventSet.eventIterator();
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
@@ -1000,16 +1175,21 @@ public class VMController {
 						eventSets.put( ee.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on exception - wait for continue request
 						break;
+					} else if ( evt instanceof VMStartEvent ) {
+						// VMStartEvent is handled by calling vm.resume() above, no need for eventSet.resume()
+						isVMStartEvent = true;
 					}
 				}
 
-				if ( shouldResume ) {
+				if ( shouldResume && !isVMStartEvent ) {
 					eventSet.resume();
+				} else if ( !isVMStartEvent ) {
+					LOGGER.fine( "Not resuming event set - waiting for continue request" );
 				}
 
 				// Resume helper thread if present and suspended
 				vm.allThreads().stream()
-				    .filter( t -> t.name().equalsIgnoreCase( "DebuggerHelper-Worker" ) )
+				    .filter( t -> t.name().equalsIgnoreCase( "BoxLang-DebuggerWorker" ) )
 				    .findFirst()
 				    .ifPresent( helperThread -> {
 					    if ( helperThread.isSuspended() ) {
@@ -1031,7 +1211,7 @@ public class VMController {
 
 	public ThreadReference getDebugThread() {
 		for ( ThreadReference ref : vm.allThreads() ) {
-			if ( ref.name().equals( "bxDebugAgent" ) ) {
+			if ( ref.name().equals( "BoxLang-DebuggerInvoker" ) ) {
 				return ref;
 			}
 		}
@@ -1045,13 +1225,13 @@ public class VMController {
 
 		LOGGER.info( "Handling MethodEntryEvent for " + className + "." + methodName );
 
-		if ( className.equalsIgnoreCase( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
-			if ( !methodName.equals( "methodEntryBreakpointHook" ) ) {
+		if ( className.equalsIgnoreCase( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
+			if ( !methodName.equals( "debuggerHook" ) ) {
 				event.thread().resume();
 				return;
 			}
 
-			LOGGER.fine( "DebuggerHelper.methodEntryBreakpoinHook invoked" );
+			LOGGER.fine( "DebuggerService.debuggerHook invoked" );
 
 			if ( debugThread == null ) {
 				debugThread = event.thread();
@@ -1071,8 +1251,8 @@ public class VMController {
 			return;
 		}
 
-		if ( !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" )
-		    && !className.equals( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" ) ) {
+		// Resume threads that are not from the DebuggerService
+		if ( !className.equals( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
 			event.thread().resume();
 			return;
 		}
@@ -1553,7 +1733,16 @@ public class VMController {
 	 */
 	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
-		LOGGER.info( "Class loaded: " + refType.name() );
+
+		// Check if this is the DebuggerService class - mark it as available
+		// Note: We don't call startDebuggerService() here because invokeMethod()
+		// blocks and would hang the event processing loop. Instead, we defer the
+		// start to when we actually need to invoke methods via InvokeTools.
+		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerServiceStarted ) {
+			LOGGER.info( "DebuggerService class loaded - will start service on first method invocation" );
+			// Store the class type for later use
+			this.debuggerServiceClass = ( ClassType ) refType;
+		}
 
 		// Check if this is the BoxRuntimeException class and we have exception breakpoints enabled
 		if ( refType.name().equals( BOX_RUNTIME_EXCEPTION_CLASS ) && ( caughtExceptionsEnabled || uncaughtExceptionsEnabled ) && exceptionRequest == null ) {
@@ -1561,11 +1750,9 @@ public class VMController {
 			createExceptionRequest( refType );
 		}
 
-		// Check if this is a BoxLang generated class
-		if ( refType.name().toLowerCase().contains( "box" ) ||
-		    refType.name().toLowerCase().contains( "generated" ) ||
-		    refType.name().toLowerCase().contains( "script" ) ) {
-			LOGGER.info( "Potential BoxLang class detected: " + refType.name() );
+		// Log boxgenerated classes specifically - these are what we care about for breakpoints
+		if ( refType.name().startsWith( "boxgenerated." ) ) {
+			LOGGER.info( "BoxLang generated class loaded: " + refType.name() );
 		}
 
 		// Try to set any pending breakpoints for this class
@@ -1596,11 +1783,8 @@ public class VMController {
 	 */
 	private void reapplyVerifiedBreakpointsForClass( ReferenceType refType ) {
 		if ( verifiedBreakpoints.isEmpty() ) {
-			LOGGER.fine( "No verified breakpoints to re-apply" );
 			return;
 		}
-
-		LOGGER.info( "Checking " + verifiedBreakpoints.size() + " verified breakpoints for class: " + refType.name() );
 
 		for ( VerifiedBreakpointInfo verified : verifiedBreakpoints.values() ) {
 			try {
@@ -2086,20 +2270,17 @@ public class VMController {
 
 	private void setupMethodEntryRequest() {
 		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.*" );
-		this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugAgent" );
-		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequest.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
 		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		// this.methodEntryRequest.enable();
-		LOGGER.info( "Set up method entry request for DebugAgent" );
+		LOGGER.info( "Set up method entry request for DebuggerService" );
 
 		// create other debug thread request
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
-		// // req.addClassFilter( "ortus.boxlang.moduleslug.instrumentation.DebugHelper" );
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
-		LOGGER.info( "Set up method entry request for DebugAgent" );
+		LOGGER.info( "Set up method entry request for DebuggerService invoker thread" );
 	}
 
 	private CompletableFuture<Value> getRuntime() {

@@ -2,6 +2,15 @@ package ortus.boxlang.bxdebugger.instrumentation;
 
 import java.lang.instrument.Instrumentation;
 
+/**
+ * @deprecated This class is no longer needed. The debugging functionality has been
+ *             moved to {@code ortus.boxlang.runtime.services.DebuggerService} which
+ *             is built into the BoxLang runtime. The agent loading mechanism has
+ *             been replaced with JDI-based service startup.
+ *
+ * @see ortus.boxlang.runtime.services.DebuggerService
+ */
+@Deprecated
 public class DebugAgent {
 
 	private static final Object lock = new Object();

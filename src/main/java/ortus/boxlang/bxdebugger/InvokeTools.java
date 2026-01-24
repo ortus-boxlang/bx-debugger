@@ -106,7 +106,7 @@ public class InvokeTools {
 	private static Value pollForResult( VMController vmController, String taskId ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerHelper class not found" );
+			LOGGER.severe( "DebuggerService class not found" );
 			return null;
 		}
 
@@ -148,7 +148,7 @@ public class InvokeTools {
 	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerHelper class not found for enqueueStatic" );
+			LOGGER.severe( "DebuggerService class not found for enqueueStatic" );
 			return null;
 		}
 
@@ -188,7 +188,7 @@ public class InvokeTools {
 	    List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerHelper class not found for enqueueOnObject" );
+			LOGGER.severe( "DebuggerService class not found for enqueueOnObject" );
 			return null;
 		}
 
@@ -266,8 +266,63 @@ public class InvokeTools {
 	}
 
 	private static ClassType getHelperClass( VMController vmController ) {
-		List<ReferenceType> classes = vmController.vm.classesByName( "ortus.boxlang.moduleslug.instrumentation.DebuggerHelper" );
+		// First, get the class type (either from cache or by looking it up)
+		ClassType debuggerServiceClass = vmController.getDebuggerServiceClass();
+		
+		if ( debuggerServiceClass == null ) {
+			LOGGER.warning( "DebuggerService class not loaded yet" );
+			return null;
+		}
 
-		return ( ClassType ) classes.get( 0 );
+		// Ensure the DebuggerService.start() has been called
+		if ( !vmController.isDebuggerServiceStarted() ) {
+			// We need a suspended thread to call start()
+			// First try to get a breakpoint thread, then fall back to debug thread
+			ThreadReference startThread = findSuspendedThread( vmController );
+			if ( startThread != null ) {
+				LOGGER.info( "Starting DebuggerService using thread: " + startThread.name() );
+				if ( !vmController.ensureDebuggerServiceStarted( startThread ) ) {
+					LOGGER.severe( "Failed to start DebuggerService" );
+					return null;
+				}
+				// After starting, give a moment for the invoker thread to be created
+				try {
+					Thread.sleep( 200 );
+				} catch ( InterruptedException e ) {
+					Thread.currentThread().interrupt();
+				}
+			} else {
+				LOGGER.warning( "No suspended thread available to start DebuggerService" );
+				return null;
+			}
+		}
+
+		return debuggerServiceClass;
+	}
+
+	/**
+	 * Find any suspended thread we can use to invoke methods.
+	 * Prefers breakpoint threads over the debug invoker thread.
+	 */
+	private static ThreadReference findSuspendedThread( VMController vmController ) {
+		// First look for any suspended thread that isn't the debugger invoker/worker
+		for ( ThreadReference thread : vmController.vm.allThreads() ) {
+			if ( thread.isSuspended() && 
+					!thread.name().equals( "BoxLang-DebuggerInvoker" ) && 
+					!thread.name().equals( "BoxLang-DebuggerWorker" ) ) {
+				LOGGER.fine( "Found suspended thread for DebuggerService start: " + thread.name() );
+				return thread;
+			}
+		}
+		
+		// Fall back to main thread if it's suspended
+		for ( ThreadReference thread : vmController.vm.allThreads() ) {
+			if ( thread.name().equals( "main" ) && thread.isSuspended() ) {
+				LOGGER.fine( "Using main thread for DebuggerService start" );
+				return thread;
+			}
+		}
+		
+		return null;
 	}
 }

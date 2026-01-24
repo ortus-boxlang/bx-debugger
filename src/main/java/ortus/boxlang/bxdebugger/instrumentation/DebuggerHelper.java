@@ -11,26 +11,14 @@ import java.util.concurrent.LinkedBlockingQueue;
 /**
  * DebuggerHelper
  * <p>
- * Minimal, self-contained helper to run in the target VM. It exposes a tiny enqueue/poll API
- * suitable for being driven via JDI's ClassType.invokeMethod(...). The debugger should only
- * call these methods using a dedicated "invoker" ThreadReference (a short suspended thread) —
- * the static methods below are intentionally short: they only enqueue tasks or read results.
- * The heavy reflective invocation runs on a separate worker thread.
+ * @deprecated This class is no longer needed. The debugging functionality has been
+ *             moved to {@code ortus.boxlang.runtime.services.DebuggerService} which
+ *             is built into the BoxLang runtime. The agent loading mechanism has
+ *             been replaced with JDI-based service startup.
  *
- * Usage summary:
- * - Debugger calls DebuggerHelper.start() once (from a safe suspended event thread) to ensure
- * the invoker and worker threads exist.
- * - Debugger finds the invoker ThreadReference by name and uses it to invoke the static methods
- * (enqueueOnObject / enqueueStatic / pollResult) via JDI. Keep those calls short.
- *
- * Notes:
- * - enqueueOnObject accepts a real Object instance (Object) as the first parameter — when called
- * from JDI the ObjectReference will be marshalled and the helper receives the real target object.
- * - The helper stores results in an internal concurrent map keyed by task id. pollResult removes
- * the result and returns it (so the map does not grow unbounded by default).
- * - The helper itself makes a best-effort to survive any thrown exceptions and will keep processing
- * tasks.
+ * @see ortus.boxlang.runtime.services.DebuggerService
  */
+@Deprecated
 public final class DebuggerHelper {
 
 	public static final String												INVOKER_THREAD_NAME	= "DebuggerInvoker-DEBUGGER_HELPER";
