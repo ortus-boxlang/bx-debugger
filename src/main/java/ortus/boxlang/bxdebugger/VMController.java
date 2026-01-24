@@ -551,20 +551,24 @@ public class VMController {
 		ClassPrepareRequest	classPrepareRequest	= requestManager.createClassPrepareRequest();
 		// Filter for BoxLang generated classes only for efficiency
 		classPrepareRequest.addClassFilter( "boxgenerated.*" );
-		classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		// Use SUSPEND_NONE for better performance - we don't need the thread suspended
+		// to set breakpoints, we just need to be notified when classes are loaded
+		classPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		classPrepareRequest.enable();
-		LOGGER.info( "Set up class prepare events for boxgenerated.* classes" );
+		LOGGER.info( "Set up class prepare events for boxgenerated.* classes (SUSPEND_NONE)" );
 
 		// Also listen for BoxRuntimeException class loading (for deferred exception breakpoints)
+		// SUSPEND_NONE since we just store the reference
 		ClassPrepareRequest exceptionClassPrepareRequest = requestManager.createClassPrepareRequest();
 		exceptionClassPrepareRequest.addClassFilter( BOX_RUNTIME_EXCEPTION_CLASS );
-		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		exceptionClassPrepareRequest.enable();
 
-		// Listen for DebuggerService class loading to start it
+		// Listen for DebuggerService class loading to store reference
+		// SUSPEND_NONE since we just store the reference and start lazily
 		ClassPrepareRequest debuggerServicePrepareRequest = requestManager.createClassPrepareRequest();
 		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
-		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		debuggerServicePrepareRequest.enable();
 	}
 
@@ -904,11 +908,11 @@ public class VMController {
 		}
 
 		if ( bestMatch != null && bestMatchLocation != null ) {
-			LOGGER.info( "Setting breakpoint on class: " + bestMatch.name() + " at line " + lineNumber );
+			LOGGER.fine( "Setting breakpoint on class: " + bestMatch.name() + " at line " + lineNumber );
 			return createBreakpointRequest( breakpointId, bestMatchLocation, filePath, lineNumber, condition, hitCondition, logMessage );
 		}
 
-		LOGGER.info( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
+		LOGGER.fine( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
 		return false;
 
 	}
@@ -945,7 +949,7 @@ public class VMController {
 			String		sourcePath	= getSourcePath( location );
 
 			if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-				LOGGER.info( "Setting breakpoint on class: " + refType.name() + " at line " + lineNumber );
+				LOGGER.fine( "Setting breakpoint on class: " + refType.name() + " at line " + lineNumber );
 				return createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
 			}
 		} catch ( AbsentInformationException e ) {
@@ -1293,7 +1297,7 @@ public class VMController {
 		var	className	= event.location().declaringType().name();
 		var	methodName	= event.location().method().name();
 
-		LOGGER.info( "Handling MethodEntryEvent for " + className + "." + methodName );
+		LOGGER.fine( "Handling MethodEntryEvent for " + className + "." + methodName );
 
 		if ( className.equalsIgnoreCase( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
 			if ( !methodName.equals( "debuggerHook" ) ) {
@@ -1821,9 +1825,9 @@ public class VMController {
 			createExceptionRequest( refType );
 		}
 
-		// Log boxgenerated classes specifically - these are what we care about for breakpoints
+		// Log boxgenerated classes at fine level to reduce overhead
 		if ( refType.name().startsWith( "boxgenerated." ) ) {
-			LOGGER.info( "BoxLang generated class loaded: " + refType.name() );
+			LOGGER.fine( "BoxLang generated class loaded: " + refType.name() );
 			if ( !firstBoxGeneratedClassSeen ) {
 				firstBoxGeneratedClassSeen = true;
 				LOGGER.info( "[TIMING] First boxgenerated class at T+" + getElapsedTime() + "ms (BoxLang runtime init complete)" );
