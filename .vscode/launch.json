@@ -14,7 +14,7 @@
             "type": "java",
             "name": "BoxDebugger",
             "request": "launch",
-            "mainClass": "ortus.boxlang.moduleslug.BoxDebugger",
+            "mainClass": "ortus.boxlang.bxdebugger.BoxDebugger",
             "projectName": "bx-debugger",
             "args": "9898"
         },
