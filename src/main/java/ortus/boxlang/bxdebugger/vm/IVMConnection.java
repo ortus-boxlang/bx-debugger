@@ -14,20 +14,20 @@ import com.sun.tools.attach.AttachNotSupportedException;
 public interface IVMConnection {
 
 	/**
-	 * The fully qualified class name of the DebuggerService in BoxLang runtime
+	 * The fully qualified class name of the DebuggerUtil in BoxLang runtime
 	 */
-	public static final String DEBUGGER_SERVICE_CLASS = "ortus.boxlang.runtime.services.DebuggerService";
+	public static final String DEBUGGER_SERVICE_CLASS = "ortus.boxlang.debug.DebuggerExternalConnectionUtil";
 
 	/**
-	 * Check if the DebuggerService is already started in the target VM.
-	 * BoxLang now starts the DebuggerService automatically when debugMode=true,
+	 * Check if the DebuggerUtil is already started in the target VM.
+	 * BoxLang now starts the DebuggerUtil automatically when debugMode=true,
 	 * so this method just detects if it's running by looking for the invoker thread.
 	 *
 	 * @param vm The target virtual machine
 	 *
 	 * @return true if the service is started (invoker thread exists)
 	 */
-	public static boolean isDebuggerServiceStarted( VirtualMachine vm ) {
+	public static boolean isDebuggerUtilStarted( VirtualMachine vm ) {
 		try {
 			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
 			if ( classes.isEmpty() ) {
@@ -63,7 +63,7 @@ public interface IVMConnection {
 	 * @throws IOException                 if an I/O error occurs
 	 *
 	 * @deprecated The agent loading mechanism is no longer used.
-	 *             BoxLang now starts the DebuggerService automatically when debugMode=true.
+	 *             BoxLang now starts the DebuggerUtil automatically when debugMode=true.
 	 */
 	@Deprecated
 	public com.sun.tools.attach.VirtualMachine getAttachVirtualMachine() throws AttachNotSupportedException, IOException;

@@ -65,13 +65,13 @@ public class VMController {
 
 	/**
 	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerService is not available, which is a non-recoverable state.
+	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
 	 *
 	 * @param message The error message to log
 	 */
 	private static void fatalError( String message ) {
 		LOGGER.severe( "FATAL: " + message );
-		LOGGER.severe( "The debugger cannot function without the DebuggerService. Ensure BoxLang is started with debugMode=true" );
+		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
 		System.exit( 1 );
 	}
 
@@ -105,13 +105,13 @@ public class VMController {
 	private ExceptionRequest												exceptionRequest				= null;
 	private final Map<Long, ExceptionInfo>									exceptionInfoByThread			= new ConcurrentHashMap<>();
 
-	// DebuggerService support
-	private static final String												DEBUGGER_SERVICE_CLASS			= "ortus.boxlang.runtime.services.DebuggerService";
-	private volatile boolean												debuggerServiceStarted			= false;
-	private volatile ClassType												debuggerServiceClass			= null;
+	// DebuggerUtil support
+	private static final String												DEBUGGER_SERVICE_CLASS			= "ortus.boxlang.debug.DebuggerExternalConnectionUtil";
+	private volatile boolean												debuggerUtilStarted				= false;
+	private volatile ClassType												debuggerUtilClass				= null;
 
 	// User code start signal support
-	// When BoxLang is about to execute user code, it calls DebuggerService.signalUserCodeStart()
+	// When BoxLang is about to execute user code, it calls DebuggerUtil.signalUserCodeStart()
 	// We use this to enable SUSPEND_EVENT_THREAD for targeted ClassPrepareRequests
 	private volatile boolean												userCodeStarted					= false;
 	private MethodEntryRequest												signalUserCodeStartRequest		= null;
@@ -143,7 +143,7 @@ public class VMController {
 	private final Map<String, ClassPrepareRequest>							targetedClassPrepareRequests	= new ConcurrentHashMap<>();
 	// Track MethodEntryEvent counts for timing analysis
 	private volatile int													methodEntryEventCount			= 0;
-	private volatile int													debuggerServiceMethodEntryCount	= 0;
+	private volatile int													debuggerUtilMethodEntryCount	= 0;
 	// Track ClassPrepareEvent counts for timing analysis
 	private volatile int													classPrepareEventCount			= 0;
 	private volatile int													boxgeneratedClassCount			= 0;
@@ -387,12 +387,12 @@ public class VMController {
 			this.methodEntryRequestDebugger = null;
 		}
 
-		// Create new MethodEntryRequest for DebuggerService.debuggerHook()
+		// Create new MethodEntryRequest for DebuggerUtil.debuggerHook()
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
+		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.debug.DebuggerExternalConnectionUtil" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
-		LOGGER.info( "Created method entry request for DebuggerService.debuggerHook()" );
+		LOGGER.info( "Created method entry request for DebuggerUtil.debuggerHook()" );
 		this.debugFuture = new CompletableFuture<>();
 
 		return this.debugFuture;
@@ -413,7 +413,7 @@ public class VMController {
 			}
 
 			// We need to suspend the thread at a MethodEntryEvent
-			// pauseDebugThread() creates a MethodEntryRequest for DebuggerService.debuggerHook()
+			// pauseDebugThread() creates a MethodEntryRequest for DebuggerUtil.debuggerHook()
 			// The debuggerHook() is called every ~100ms by the invoker thread
 			LOGGER.info( "Requesting debug thread suspension via MethodEntryEvent" );
 
@@ -423,7 +423,7 @@ public class VMController {
 			try {
 				future.get( 5, TimeUnit.SECONDS );
 			} catch ( TimeoutException e ) {
-				fatalError( "Timeout waiting for debug thread to suspend at MethodEntryEvent - DebuggerService may not be running" );
+				fatalError( "Timeout waiting for debug thread to suspend at MethodEntryEvent - DebuggerUtil may not be running" );
 				return null; // Unreachable, but satisfies compiler
 			} catch ( ExecutionException e ) {
 				fatalError( "Error waiting for debug thread suspension: " + e.getMessage() );
@@ -452,7 +452,7 @@ public class VMController {
 	}
 
 	/**
-	 * Ensure the DebuggerService threads are ready for condition evaluation.
+	 * Ensure the DebuggerUtil threads are ready for condition evaluation.
 	 * The worker thread needs to be running to process queued tasks.
 	 */
 	private void ensureDebugHelperThreadsReady() {
@@ -643,11 +643,11 @@ public class VMController {
 		exceptionClassPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		exceptionClassPrepareRequest.enable();
 
-		// Listen for DebuggerService class loading to store reference
-		ClassPrepareRequest debuggerServicePrepareRequest = requestManager.createClassPrepareRequest();
-		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
-		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
-		debuggerServicePrepareRequest.enable();
+		// Listen for DebuggerUtil class loading to store reference
+		ClassPrepareRequest debuggerUtilPrepareRequest = requestManager.createClassPrepareRequest();
+		debuggerUtilPrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
+		debuggerUtilPrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
+		debuggerUtilPrepareRequest.enable();
 		LOGGER.fine( "[TIMING] setupClassPrepareEvents() completed at T+" + getElapsedTime() + "ms" );
 	}
 
@@ -761,7 +761,7 @@ public class VMController {
 	 * boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
 	 *
 	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/main.bxs)
-	 * 
+	 *
 	 * @return A class pattern for matching (e.g.,
 	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs*)
 	 */
@@ -787,7 +787,7 @@ public class VMController {
 	 * Check if there are any verified breakpoints for a given file path.
 	 *
 	 * @param filePath The file path to check
-	 * 
+	 *
 	 * @return true if there are verified breakpoints for this file
 	 */
 	private boolean hasVerifiedBreakpointsForFile( String filePath ) {
@@ -801,29 +801,29 @@ public class VMController {
 	}
 
 	/**
-	 * Start the DebuggerService in the target VM.
-	 * This is called when the DebuggerService class is loaded (via ClassPrepareEvent).
+	 * Start the DebuggerUtil in the target VM.
+	 * This is called when the DebuggerUtil class is loaded (via ClassPrepareEvent).
 	 * The service creates the invoker and worker threads needed for JDI method invocations.
-	 * As of the refactoring, BoxLang now starts the DebuggerService automatically when
+	 * As of the refactoring, BoxLang now starts the DebuggerUtil automatically when
 	 * debugMode is enabled, so this method just detects if the service is running.
 	 */
 
 	/**
-	 * Check if the DebuggerService is running in the target VM by looking for the invoker thread.
-	 * BoxLang starts the DebuggerService automatically when debugMode is enabled.
+	 * Check if the DebuggerUtil is running in the target VM by looking for the invoker thread.
+	 * BoxLang starts the DebuggerUtil automatically when debugMode is enabled.
 	 *
 	 * @return true if the invoker thread is found (service is running)
 	 */
-	private boolean detectDebuggerServiceRunning() {
-		if ( debuggerServiceStarted ) {
+	private boolean detectDebuggerUtilRunning() {
+		if ( debuggerUtilStarted ) {
 			return true;
 		}
 
 		// Look for the invoker thread - its presence indicates the service is running
 		for ( ThreadReference thread : vm.allThreads() ) {
 			if ( thread.name().equals( "BoxLang-DebuggerInvoker" ) ) {
-				debuggerServiceStarted = true;
-				LOGGER.info( "DebuggerService detected as running (invoker thread found)" );
+				debuggerUtilStarted = true;
+				LOGGER.info( "DebuggerUtil detected as running (invoker thread found)" );
 				return true;
 			}
 		}
@@ -832,52 +832,52 @@ public class VMController {
 	}
 
 	/**
-	 * Ensure the DebuggerService is available for method invocations.
-	 * BoxLang starts the DebuggerService automatically when debugMode is enabled,
+	 * Ensure the DebuggerUtil is available for method invocations.
+	 * BoxLang starts the DebuggerUtil automatically when debugMode is enabled,
 	 * so this method just verifies the service is running.
 	 * If the service is not running, this is a fatal error and the debugger will exit.
 	 *
 	 * @param thread Unused - kept for API compatibility
-	 * 
+	 *
 	 * @return true if the service is running (never returns false - exits on failure)
 	 */
-	public boolean ensureDebuggerServiceStarted( ThreadReference thread ) {
-		if ( debuggerServiceStarted ) {
+	public boolean ensureDebuggerUtilStarted( ThreadReference thread ) {
+		if ( debuggerUtilStarted ) {
 			return true;
 		}
 
 		// Detect if the service is already running (started by BoxLang)
-		if ( detectDebuggerServiceRunning() ) {
+		if ( detectDebuggerUtilRunning() ) {
 			return true;
 		}
 
-		// Try to find the DebuggerService class
-		if ( debuggerServiceClass == null ) {
+		// Try to find the DebuggerUtil class
+		if ( debuggerUtilClass == null ) {
 			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
 			if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
-				debuggerServiceClass = ct;
+				debuggerUtilClass = ct;
 			}
 		}
 
 		// Service not running - this is a fatal error
-		fatalError( "DebuggerService not running" );
+		fatalError( "DebuggerUtil not running" );
 		return false; // Unreachable, but satisfies compiler
 	}
 
 	/**
-	 * Get the DebuggerService class type if it has been loaded.
+	 * Get the DebuggerUtil class type if it has been loaded.
 	 *
-	 * @return The ClassType for DebuggerService, or null if not yet loaded
+	 * @return The ClassType for DebuggerUtil, or null if not yet loaded
 	 */
-	public ClassType getDebuggerServiceClass() {
-		if ( debuggerServiceClass != null ) {
-			return debuggerServiceClass;
+	public ClassType getDebuggerUtilClass() {
+		if ( debuggerUtilClass != null ) {
+			return debuggerUtilClass;
 		}
 
 		// Try to find the class if it's been loaded
 		List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
 		if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
-			debuggerServiceClass = ct;
+			debuggerUtilClass = ct;
 			return ct;
 		}
 
@@ -885,12 +885,12 @@ public class VMController {
 	}
 
 	/**
-	 * Check if the DebuggerService has been started in the target VM.
+	 * Check if the DebuggerUtil has been started in the target VM.
 	 *
 	 * @return true if the service has been started
 	 */
-	public boolean isDebuggerServiceStarted() {
-		return debuggerServiceStarted;
+	public boolean isDebuggerUtilStarted() {
+		return debuggerUtilStarted;
 	}
 
 	/**
@@ -1513,9 +1513,9 @@ public class VMController {
 		methodEntryEventCount++;
 		LOGGER.fine( "Handling MethodEntryEvent for " + className + "." + methodName );
 
-		if ( className.equalsIgnoreCase( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
-			debuggerServiceMethodEntryCount++;
-			LOGGER.fine( "[TIMING] DebuggerService." + methodName + "() entry #" + debuggerServiceMethodEntryCount + " at T+" + getElapsedTime() + "ms" );
+		if ( className.equalsIgnoreCase( "ortus.boxlang.debug.DebuggerExternalConnectionUtil" ) ) {
+			debuggerUtilMethodEntryCount++;
+			LOGGER.fine( "[TIMING] DebuggerUtil." + methodName + "() entry #" + debuggerUtilMethodEntryCount + " at T+" + getElapsedTime() + "ms" );
 			// Handle signalUserCodeStart - this signals that BoxLang is about to run user code
 			if ( methodName.equals( "signalUserCodeStart" ) ) {
 				handleSignalUserCodeStart( event );
@@ -1527,7 +1527,7 @@ public class VMController {
 				return;
 			}
 
-			LOGGER.fine( "DebuggerService.debuggerHook invoked" );
+			LOGGER.fine( "DebuggerUtil.debuggerHook invoked" );
 
 			// If we're waiting for the debug thread (debugFuture is set), capture it and complete the future
 			// This happens when getPreparedDebugInvokeThread() calls pauseDebugThread()
@@ -1559,8 +1559,8 @@ public class VMController {
 			return;
 		}
 
-		// Resume threads that are not from the DebuggerService
-		if ( !className.equals( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
+		// Resume threads that are not from the DebuggerUtil
+		if ( !className.equals( "ortus.boxlang.debug.DebuggerExternalConnectionUtil" ) ) {
 			event.thread().resume();
 			return;
 		}
@@ -1598,7 +1598,7 @@ public class VMController {
 		}
 
 		LOGGER.fine( "[TIMING] signalUserCodeStart received at T+" + getElapsedTime() + "ms - enabling breakpoint suspension" );
-		LOGGER.fine( "[TIMING] Total MethodEntryEvents so far: " + methodEntryEventCount + ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
+		LOGGER.fine( "[TIMING] Total MethodEntryEvents so far: " + methodEntryEventCount + ", DebuggerUtil entries: " + debuggerUtilMethodEntryCount );
 		userCodeStarted = true;
 
 		// Disable the signalUserCodeStart request - we only need to catch it once
@@ -1687,7 +1687,7 @@ public class VMController {
 				LOGGER.fine( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
 				    ", boxgenerated classes: " + boxgeneratedClassCount +
 				    ", MethodEntryEvents: " + methodEntryEventCount +
-				    ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
+				    ", DebuggerUtil entries: " + debuggerUtilMethodEntryCount );
 			}
 
 		} catch ( Exception e ) {
@@ -2084,15 +2084,15 @@ public class VMController {
 		ReferenceType refType = event.referenceType();
 		classPrepareEventCount++;
 
-		// Check if this is the DebuggerService class - store it for later use.
-		// BoxLang now starts the DebuggerService automatically when debugMode=true,
+		// Check if this is the DebuggerUtil class - store it for later use.
+		// BoxLang now starts the DebuggerUtil automatically when debugMode=true,
 		// so we just need to track when the class is loaded.
-		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerServiceStarted ) {
-			LOGGER.fine( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms" );
+		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerUtilStarted ) {
+			LOGGER.fine( "[TIMING] DebuggerUtil class loaded at T+" + getElapsedTime() + "ms" );
 			// Store the class type for later use
-			this.debuggerServiceClass = ( ClassType ) refType;
+			this.debuggerUtilClass = ( ClassType ) refType;
 			// Check if the service is already running (started by BoxLang)
-			detectDebuggerServiceRunning();
+			detectDebuggerUtilRunning();
 		}
 
 		// Check if this is the BoxRuntimeException class and we have exception breakpoints enabled
@@ -2643,7 +2643,7 @@ public class VMController {
 		LOGGER.fine( "[TIMING] setupMethodEntryRequest() starting at T+" + getElapsedTime() + "ms" );
 
 		// MethodEntryRequests are not created at startup to avoid performance overhead.
-		// Instead, pauseDebugThread() creates a targeted MethodEntryRequest for DebuggerService.debuggerHook()
+		// Instead, pauseDebugThread() creates a targeted MethodEntryRequest for DebuggerUtil.debuggerHook()
 		// only when needed for JDI method invocations (e.g., evaluating watch expressions).
 
 		// Set userCodeStarted = true immediately since we don't use signalUserCodeStart detection

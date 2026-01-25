@@ -15,7 +15,6 @@ import com.sun.jdi.InvalidTypeException;
 import com.sun.jdi.InvocationException;
 import com.sun.jdi.Method;
 import com.sun.jdi.ObjectReference;
-import com.sun.jdi.ReferenceType;
 import com.sun.jdi.StringReference;
 import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
@@ -29,13 +28,13 @@ public class InvokeTools {
 
 	/**
 	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerService is not available, which is a non-recoverable state.
+	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
 	 *
 	 * @param message The error message to log
 	 */
 	private static void fatalError( String message ) {
 		LOGGER.severe( "FATAL: " + message );
-		LOGGER.severe( "The debugger cannot function without the DebuggerService. Ensure BoxLang is started with debugMode=true" );
+		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
 		System.exit( 1 );
 	}
 
@@ -118,7 +117,7 @@ public class InvokeTools {
 	private static Value pollForResult( VMController vmController, String taskId ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			fatalError( "DebuggerService class not found during pollForResult" );
+			fatalError( "DebuggerUtil class not found during pollForResult" );
 			return null; // Unreachable, but satisfies compiler
 		}
 
@@ -160,7 +159,7 @@ public class InvokeTools {
 	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			fatalError( "DebuggerService class not found for enqueueStatic" );
+			fatalError( "DebuggerUtil class not found for enqueueStatic" );
 			return null; // Unreachable, but satisfies compiler
 		}
 
@@ -200,7 +199,7 @@ public class InvokeTools {
 	    List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			fatalError( "DebuggerService class not found for enqueueOnObject" );
+			fatalError( "DebuggerUtil class not found for enqueueOnObject" );
 			return null; // Unreachable, but satisfies compiler
 		}
 
@@ -279,22 +278,22 @@ public class InvokeTools {
 
 	private static ClassType getHelperClass( VMController vmController ) {
 		// First, get the class type (either from cache or by looking it up)
-		ClassType debuggerServiceClass = vmController.getDebuggerServiceClass();
+		ClassType debuggerUtilClass = vmController.getDebuggerUtilClass();
 
-		if ( debuggerServiceClass == null ) {
-			fatalError( "DebuggerService class not loaded" );
+		if ( debuggerUtilClass == null ) {
+			fatalError( "DebuggerUtil class not loaded" );
 			return null; // Unreachable, but satisfies compiler
 		}
 
-		// Verify the DebuggerService is running (started by BoxLang when debugMode=true)
-		if ( !vmController.isDebuggerServiceStarted() ) {
+		// Verify the DebuggerUtil is running (started by BoxLang when debugMode=true)
+		if ( !vmController.isDebuggerUtilStarted() ) {
 			// Try to detect if it's running by looking for the invoker thread
-			if ( !vmController.ensureDebuggerServiceStarted( null ) ) {
-				fatalError( "DebuggerService not running" );
+			if ( !vmController.ensureDebuggerUtilStarted( null ) ) {
+				fatalError( "DebuggerUtil not running" );
 				return null; // Unreachable, but satisfies compiler
 			}
 		}
 
-		return debuggerServiceClass;
+		return debuggerUtilClass;
 	}
 }

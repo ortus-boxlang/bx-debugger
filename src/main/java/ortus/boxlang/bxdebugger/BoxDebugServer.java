@@ -280,9 +280,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
 				vmController.startEventProcessing();
 
-				// Note: The DebuggerService will be started automatically when its class is loaded
+				// Note: The DebuggerUtil will be started automatically when its class is loaded
 				// via the ClassPrepareEvent handler in VMController. We no longer need to call
-				// startDebuggerService here because the class may not be loaded yet at this point.
+				// startDebuggerUtil here because the class may not be loaded yet at this point.
 
 				// Start output monitoring after VM is resumed
 				startOutputMonitoring();
