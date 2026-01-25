@@ -102,7 +102,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		this.client				= client;
 		this.sessionStartTime	= System.currentTimeMillis();
 		LOGGER.info( "Connected to debug client" );
-		LOGGER.info( "[TIMING] Session started at T+0ms" );
+		LOGGER.fine( "[TIMING] Session started at T+0ms" );
 	}
 
 	private void parseFalseExitProperty() {
@@ -135,7 +135,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	@Override
 	public CompletableFuture<Capabilities> initialize( InitializeRequestArguments args ) {
 		LOGGER.info( "Initialize request received from client: " + args.getClientName() );
-		LOGGER.info( "[TIMING] Initialize request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+		LOGGER.fine( "[TIMING] Initialize request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 		Capabilities capabilities = new Capabilities();
 		capabilities.setSupportsConfigurationDoneRequest( true );
@@ -258,7 +258,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			try {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
-				LOGGER.info( "[TIMING] Launch request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+				LOGGER.fine( "[TIMING] Launch request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 				configureDebugSettings( args );
 
@@ -1014,7 +1014,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		return CompletableFuture.supplyAsync( () -> {
 
 			LOGGER.info( "Configuration done request received" );
-			LOGGER.info( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+			LOGGER.fine( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 			// Wait for launch to complete before processing configurationDone
 			// This ensures the VM is ready before we try to set breakpoints

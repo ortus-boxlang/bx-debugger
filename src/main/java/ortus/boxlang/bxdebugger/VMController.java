@@ -559,7 +559,7 @@ public class VMController {
 			return;
 		}
 
-		LOGGER.info( "[TIMING] setupClassPrepareEvents() starting at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] setupClassPrepareEvents() starting at T+" + getElapsedTime() + "ms" );
 		LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 
@@ -589,7 +589,7 @@ public class VMController {
 		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
 		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		debuggerServicePrepareRequest.enable();
-		LOGGER.info( "[TIMING] setupClassPrepareEvents() completed at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] setupClassPrepareEvents() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	/**
@@ -647,7 +647,7 @@ public class VMController {
 			return;
 		}
 
-		LOGGER.info( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() starting at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() starting at T+" + getElapsedTime() + "ms" );
 		LOGGER.info( "Recreating " + targetedClassPrepareRequests.size() + " targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD" );
 
 		EventRequestManager	requestManager	= vm.eventRequestManager();
@@ -672,7 +672,7 @@ public class VMController {
 		for ( String filePath : filePaths ) {
 			createTargetedClassPrepareRequest( filePath );
 		}
-		LOGGER.info( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() completed at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	/**
@@ -1350,7 +1350,7 @@ public class VMController {
 		// now we can resume the VM
 		if ( vmStartEventReceived && vm != null ) {
 			LOGGER.info( "Resuming VM after configurationDone" );
-			LOGGER.info( "[TIMING] VM resumed at T+" + getElapsedTime() + "ms" );
+			LOGGER.fine( "[TIMING] VM resumed at T+" + getElapsedTime() + "ms" );
 			try {
 				// First resume via the EventSet if we have one stored
 				if ( vmStartEventSet != null ) {
@@ -1505,7 +1505,7 @@ public class VMController {
 
 		if ( className.equalsIgnoreCase( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
 			debuggerServiceMethodEntryCount++;
-			LOGGER.info( "[TIMING] DebuggerService." + methodName + "() entry #" + debuggerServiceMethodEntryCount + " at T+" + getElapsedTime() + "ms" );
+			LOGGER.fine( "[TIMING] DebuggerService." + methodName + "() entry #" + debuggerServiceMethodEntryCount + " at T+" + getElapsedTime() + "ms" );
 			// Handle signalUserCodeStart - this signals that BoxLang is about to run user code
 			if ( methodName.equals( "signalUserCodeStart" ) ) {
 				handleSignalUserCodeStart( event );
@@ -1575,8 +1575,8 @@ public class VMController {
 			return;
 		}
 
-		LOGGER.info( "[TIMING] signalUserCodeStart received at T+" + getElapsedTime() + "ms - enabling breakpoint suspension" );
-		LOGGER.info( "[TIMING] Total MethodEntryEvents so far: " + methodEntryEventCount + ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
+		LOGGER.fine( "[TIMING] signalUserCodeStart received at T+" + getElapsedTime() + "ms - enabling breakpoint suspension" );
+		LOGGER.fine( "[TIMING] Total MethodEntryEvents so far: " + methodEntryEventCount + ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
 		userCodeStarted = true;
 
 		// Disable the signalUserCodeStart request - we only need to catch it once
@@ -1661,8 +1661,8 @@ public class VMController {
 
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
-				LOGGER.info( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
-				LOGGER.info( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
+				LOGGER.fine( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
+				LOGGER.fine( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
 				    ", boxgenerated classes: " + boxgeneratedClassCount +
 				    ", MethodEntryEvents: " + methodEntryEventCount +
 				    ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
@@ -2067,7 +2067,7 @@ public class VMController {
 		// blocks and would hang the event processing loop. Instead, we defer the
 		// start to when we actually need to invoke methods via InvokeTools.
 		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerServiceStarted ) {
-			LOGGER.info( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms - will start service on first method invocation" );
+			LOGGER.fine( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms - will start service on first method invocation" );
 			// Store the class type for later use
 			this.debuggerServiceClass = ( ClassType ) refType;
 		}
@@ -2084,11 +2084,11 @@ public class VMController {
 			LOGGER.fine( "BoxLang generated class loaded: " + refType.name() );
 			if ( !firstBoxGeneratedClassSeen ) {
 				firstBoxGeneratedClassSeen = true;
-				LOGGER.info( "[TIMING] First boxgenerated class at T+" + getElapsedTime() + "ms (BoxLang runtime init complete)" );
+				LOGGER.fine( "[TIMING] First boxgenerated class at T+" + getElapsedTime() + "ms (BoxLang runtime init complete)" );
 			}
 			// Log every 10th boxgenerated class to track progress without flooding logs
 			if ( boxgeneratedClassCount % 10 == 0 ) {
-				LOGGER.info( "[TIMING] boxgenerated class #" + boxgeneratedClassCount + " loaded at T+" + getElapsedTime() + "ms: " + refType.name() );
+				LOGGER.fine( "[TIMING] boxgenerated class #" + boxgeneratedClassCount + " loaded at T+" + getElapsedTime() + "ms: " + refType.name() );
 			}
 		}
 
@@ -2100,7 +2100,7 @@ public class VMController {
 			if ( trySetBreakpointOnSpecificClass( refType, pending.breakpointId, pending.filePath, pending.lineNumber,
 			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
 				toRemove.add( pending );
-				LOGGER.info( "[TIMING] Successfully set breakpoint at " + pending.filePath + ":" + pending.lineNumber +
+				LOGGER.fine( "[TIMING] Successfully set breakpoint at " + pending.filePath + ":" + pending.lineNumber +
 				    " at T+" + getElapsedTime() + "ms on class " + refType.name() );
 			}
 		}
@@ -2617,7 +2617,7 @@ public class VMController {
 	}
 
 	private void setupMethodEntryRequest() {
-		LOGGER.info( "[TIMING] setupMethodEntryRequest() starting at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] setupMethodEntryRequest() starting at T+" + getElapsedTime() + "ms" );
 
 		// PERFORMANCE EXPERIMENT: Disable ALL MethodEntryRequests to test if they cause the ~19s delay
 		// The hypothesis is that even with class filters, JDI checks every method entry against these requests,
@@ -2646,20 +2646,20 @@ public class VMController {
 		// this.signalUserCodeStartRequest.enable();
 		// LOGGER.info( "Set up method entry request for DebuggerService.signalUserCodeStart" );
 
-		LOGGER.info( "[PERF TEST] All MethodEntryRequests for DebuggerService DISABLED" );
+		LOGGER.fine( "[PERF TEST] All MethodEntryRequests for DebuggerService DISABLED" );
 
 		// With MethodEntryRequests disabled, we need an alternative for signalUserCodeStart.
 		// Option 1: Set userCodeStarted = true immediately (assume user code starts right away)
 		// Option 2: Use a ClassPrepareRequest on boxgenerated.* with SUSPEND_EVENT_THREAD from the start
 		// For this test, we'll use Option 1 to see if MethodEntryRequests were the bottleneck
 		userCodeStarted = true;
-		LOGGER.info( "[PERF TEST] userCodeStarted set to true immediately (bypassing signalUserCodeStart)" );
+		LOGGER.fine( "[PERF TEST] userCodeStarted set to true immediately (bypassing signalUserCodeStart)" );
 
 		// IMPORTANT: Recreate any targeted ClassPrepareRequests that were created before we set userCodeStarted.
 		// They were created with SUSPEND_NONE, but now need SUSPEND_EVENT_THREAD to catch user code.
 		recreateTargetedClassPrepareRequestsWithSuspend();
 
-		LOGGER.info( "[TIMING] setupMethodEntryRequest() completed at T+" + getElapsedTime() + "ms" );
+		LOGGER.fine( "[TIMING] setupMethodEntryRequest() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	private CompletableFuture<Value> getRuntime() {
