@@ -362,12 +362,23 @@ public class VMController {
 	}
 
 	public CompletableFuture<Void> pauseDebugThread() {
-		// create other debug thread request
+		// Clean up any existing request before creating a new one
+		if ( this.methodEntryRequestDebugger != null ) {
+			try {
+				this.methodEntryRequestDebugger.disable();
+				this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+			} catch ( Exception e ) {
+				LOGGER.fine( "Error cleaning up old method entry request: " + e.getMessage() );
+			}
+			this.methodEntryRequestDebugger = null;
+		}
+
+		// Create new MethodEntryRequest for DebuggerService.debuggerHook()
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
 		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
 		this.methodEntryRequestDebugger.enable();
-		LOGGER.info( "Set up method entry request for DebuggerService" );
+		LOGGER.info( "Created method entry request for DebuggerService.debuggerHook()" );
 		this.debugFuture = new CompletableFuture<>();
 
 		return this.debugFuture;
@@ -375,25 +386,46 @@ public class VMController {
 
 	public ThreadReference getPreparedDebugInvokeThread() {
 		try {
-			// Get or find the debug thread dynamically
-			if ( debugThread == null ) {
-				debugThread = getDebugThread();
+			// JDI's invokeMethod() requires a thread suspended at an EVENT (breakpoint, method entry, etc.)
+			// Simply calling ThreadReference.suspend() is NOT sufficient.
+			// We need to use pauseDebugThread() which creates a MethodEntryRequest for debuggerHook()
+			// and waits for the thread to hit that event.
+
+			// If we already have a properly suspended debug thread, return it
+			if ( debugThread != null && debugThread.isSuspended() ) {
+				// Ensure the worker thread is running to process queued tasks
+				ensureDebugHelperThreadsReady();
+				return debugThread;
 			}
 
+			// We need to suspend the thread at a MethodEntryEvent
+			// pauseDebugThread() creates a MethodEntryRequest for DebuggerService.debuggerHook()
+			// The debuggerHook() is called every ~100ms by the invoker thread
+			LOGGER.info( "Requesting debug thread suspension via MethodEntryEvent" );
+
+			CompletableFuture<Void> future = pauseDebugThread();
+
+			// Wait for the MethodEntryEvent to fire (max 5 seconds - should happen within 100ms)
+			try {
+				future.get( 5, TimeUnit.SECONDS );
+			} catch ( TimeoutException e ) {
+				LOGGER.severe( "Timeout waiting for debug thread to suspend at MethodEntryEvent" );
+				return null;
+			} catch ( ExecutionException e ) {
+				LOGGER.severe( "Error waiting for debug thread suspension: " + e.getMessage() );
+				return null;
+			}
+
+			// debugThread is now set by handleMethodEntryEvent() and is properly suspended
 			if ( debugThread == null ) {
-				LOGGER.warning( "Debug invoker thread not found - DebuggerService may not be running" );
+				LOGGER.warning( "Debug thread not captured after MethodEntryEvent" );
 				return null;
 			}
 
 			// Ensure the worker thread is running to process queued tasks
 			ensureDebugHelperThreadsReady();
 
-			// Suspend the invoker thread if it's not already suspended
-			if ( debugThread.suspendCount() == 0 ) {
-				debugThread.suspend();
-				LOGGER.fine( "Suspended debug invoker thread for method invocation" );
-			}
-
+			LOGGER.fine( "Debug thread properly suspended at MethodEntryEvent" );
 			return debugThread;
 		} catch ( Exception e ) {
 			LOGGER.warning( "Error preparing debug thread: " + e.getMessage() );
@@ -1513,19 +1545,31 @@ public class VMController {
 
 			LOGGER.fine( "DebuggerService.debuggerHook invoked" );
 
-			if ( debugThread == null ) {
-				debugThread = event.thread();
-				this.methodEntryRequestDebugger.setEnabled( false );
-				this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
-				LOGGER.info( "Completed debug thread future from method entry hook" );
-			}
-
+			// If we're waiting for the debug thread (debugFuture is set), capture it and complete the future
+			// This happens when getPreparedDebugInvokeThread() calls pauseDebugThread()
 			if ( this.debugFuture != null ) {
-				this.methodEntryRequestDebugger.setEnabled( false );
-				this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+				// Always update debugThread to the current event's thread - it's now properly suspended
+				debugThread = event.thread();
+				if ( this.methodEntryRequestDebugger != null ) {
+					this.methodEntryRequestDebugger.setEnabled( false );
+					this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+					this.methodEntryRequestDebugger = null;
+				}
 				this.debugFuture.complete( null );
 				this.debugFuture = null;
-				LOGGER.info( "Completed pause debug thread future from method entry hook" );
+				LOGGER.info( "Debug thread captured and suspended at debuggerHook() MethodEntryEvent" );
+				return;
+			}
+
+			// Legacy path: if debugThread is null, capture it (but this shouldn't happen with the new flow)
+			if ( debugThread == null ) {
+				debugThread = event.thread();
+				if ( this.methodEntryRequestDebugger != null ) {
+					this.methodEntryRequestDebugger.setEnabled( false );
+					this.vm.eventRequestManager().deleteEventRequest( this.methodEntryRequestDebugger );
+					this.methodEntryRequestDebugger = null;
+				}
+				LOGGER.info( "Debug thread captured (legacy path)" );
 			}
 
 			return;
