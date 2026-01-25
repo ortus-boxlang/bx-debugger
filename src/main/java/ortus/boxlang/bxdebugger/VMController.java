@@ -375,18 +375,28 @@ public class VMController {
 
 	public ThreadReference getPreparedDebugInvokeThread() {
 		try {
+			// Get or find the debug thread dynamically
+			if ( debugThread == null ) {
+				debugThread = getDebugThread();
+			}
 
+			if ( debugThread == null ) {
+				LOGGER.warning( "Debug invoker thread not found - DebuggerService may not be running" );
+				return null;
+			}
+
+			// Ensure the worker thread is running to process queued tasks
+			ensureDebugHelperThreadsReady();
+
+			// Suspend the invoker thread if it's not already suspended
 			if ( debugThread.suspendCount() == 0 ) {
-				pauseDebugThread().get();
+				debugThread.suspend();
+				LOGGER.fine( "Suspended debug invoker thread for method invocation" );
 			}
 
 			return debugThread;
-		} catch ( InterruptedException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		} catch ( ExecutionException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+		} catch ( Exception e ) {
+			LOGGER.warning( "Error preparing debug thread: " + e.getMessage() );
 		}
 
 		return null;
