@@ -54,12 +54,26 @@ import com.sun.jdi.request.ExceptionRequest;
 import com.sun.jdi.request.MethodEntryRequest;
 import com.sun.jdi.request.StepRequest;
 
+import ortus.boxlang.runtime.util.FQN;
+
 /**
  * Manages JDI breakpoints and handles breakpoint events
  */
 public class VMController {
 
-	private static final Logger												LOGGER							= Logger.getLogger( VMController.class.getName() );
+	private static final Logger LOGGER = Logger.getLogger( VMController.class.getName() );
+
+	/**
+	 * Fatal error that terminates the debugger.
+	 * Called when the DebuggerService is not available, which is a non-recoverable state.
+	 *
+	 * @param message The error message to log
+	 */
+	private static void fatalError( String message ) {
+		LOGGER.severe( "FATAL: " + message );
+		LOGGER.severe( "The debugger cannot function without the DebuggerService. Ensure BoxLang is started with debugMode=true" );
+		System.exit( 1 );
+	}
 
 	public final VirtualMachine												vm;
 	private final IDebugProtocolClient										client;
@@ -409,17 +423,17 @@ public class VMController {
 			try {
 				future.get( 5, TimeUnit.SECONDS );
 			} catch ( TimeoutException e ) {
-				LOGGER.severe( "Timeout waiting for debug thread to suspend at MethodEntryEvent" );
-				return null;
+				fatalError( "Timeout waiting for debug thread to suspend at MethodEntryEvent - DebuggerService may not be running" );
+				return null; // Unreachable, but satisfies compiler
 			} catch ( ExecutionException e ) {
-				LOGGER.severe( "Error waiting for debug thread suspension: " + e.getMessage() );
-				return null;
+				fatalError( "Error waiting for debug thread suspension: " + e.getMessage() );
+				return null; // Unreachable, but satisfies compiler
 			}
 
 			// debugThread is now set by handleMethodEntryEvent() and is properly suspended
 			if ( debugThread == null ) {
-				LOGGER.warning( "Debug thread not captured after MethodEntryEvent" );
-				return null;
+				fatalError( "Debug thread not captured after MethodEntryEvent" );
+				return null; // Unreachable, but satisfies compiler
 			}
 
 			// Ensure the worker thread is running to process queued tasks
@@ -427,11 +441,14 @@ public class VMController {
 
 			LOGGER.fine( "Debug thread properly suspended at MethodEntryEvent" );
 			return debugThread;
+		} catch ( InterruptedException e ) {
+			Thread.currentThread().interrupt();
+			fatalError( "Interrupted while waiting for debug thread: " + e.getMessage() );
 		} catch ( Exception e ) {
-			LOGGER.warning( "Error preparing debug thread: " + e.getMessage() );
+			fatalError( "Error preparing debug thread: " + e.getMessage() );
 		}
 
-		return null;
+		return null; // Unreachable, but satisfies compiler
 	}
 
 	/**
@@ -737,67 +754,33 @@ public class VMController {
 
 	/**
 	 * Convert a file path to a BoxLang class pattern for ClassPrepareRequest filtering.
+	 * Uses BoxLang's FQN class to generate the correct class pattern matching BoxLang's
+	 * naming conventions.
+	 *
 	 * BoxLang generates class names like:
 	 * boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
-	 *
-	 * BoxLang naming conventions:
-	 * - Directory components are lowercased
-	 * - Filename has its first letter capitalized
-	 * - Hyphens are replaced with double underscores
 	 *
 	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/main.bxs)
 	 * 
 	 * @return A class pattern for matching (e.g.,
-	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main*)
+	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs*)
 	 */
 	private String filePathToClassPattern( String filePath ) {
 		if ( filePath == null || filePath.isEmpty() ) {
 			return null;
 		}
 
-		// Normalize path separators
-		String normalizedPath = filePath.replace( "\\", "/" );
+		try {
+			// Use BoxLang's FQN class to generate the correct class pattern
+			// This ensures we match exactly what BoxLang generates
+			FQN fqn = FQN.of( "boxgenerated.templates", Path.of( filePath ) );
 
-		// Remove leading slash if present
-		if ( normalizedPath.startsWith( "/" ) ) {
-			normalizedPath = normalizedPath.substring( 1 );
+			// Append wildcard to match inner classes (closures, lambdas, etc.)
+			return fqn.toString() + "*";
+		} catch ( Exception e ) {
+			LOGGER.warning( "Error converting file path to class pattern: " + filePath + " - " + e.getMessage() );
+			return null;
 		}
-
-		// Split into directory and filename
-		// BoxLang lowercases directory components but preserves filename case
-		int		lastSlash	= normalizedPath.lastIndexOf( '/' );
-		String	directory	= lastSlash > 0 ? normalizedPath.substring( 0, lastSlash ) : "";
-		String	filename	= lastSlash > 0 ? normalizedPath.substring( lastSlash + 1 ) : normalizedPath;
-
-		// Remove file extension from filename (.bxs, .bxm, .bx, .cfc, .cfm, .cfs)
-		int		dotIndex	= filename.lastIndexOf( '.' );
-		if ( dotIndex > 0 ) {
-			String extension = filename.substring( dotIndex ).toLowerCase();
-			if ( extension.equals( ".bxs" ) || extension.equals( ".bxm" ) || extension.equals( ".bx" ) ||
-			    extension.equals( ".cfc" ) || extension.equals( ".cfm" ) || extension.equals( ".cfs" ) ) {
-				filename = filename.substring( 0, dotIndex );
-			}
-		}
-
-		// Convert directory to lowercase, replace / with . and - with __
-		// BoxLang lowercases directory components in generated class names
-		String	directoryPattern	= directory
-		    .replace( "/", "." )
-		    .replace( "-", "__" )
-		    .toLowerCase();
-
-		// Filename: capitalize first letter (BoxLang does this), replace - with __
-		// BoxLang capitalizes the first letter of the filename in generated class names
-		String	filenamePattern		= filename.replace( "-", "__" );
-		if ( !filenamePattern.isEmpty() ) {
-			filenamePattern = Character.toUpperCase( filenamePattern.charAt( 0 ) ) + filenamePattern.substring( 1 );
-		}
-
-		// Combine: boxgenerated.templates.<directory>.<Filename>*
-		if ( directoryPattern.isEmpty() ) {
-			return "boxgenerated.templates." + filenamePattern + "*";
-		}
-		return "boxgenerated.templates." + directoryPattern + "." + filenamePattern + "*";
 	}
 
 	/**
@@ -852,10 +835,11 @@ public class VMController {
 	 * Ensure the DebuggerService is available for method invocations.
 	 * BoxLang starts the DebuggerService automatically when debugMode is enabled,
 	 * so this method just verifies the service is running.
+	 * If the service is not running, this is a fatal error and the debugger will exit.
 	 *
 	 * @param thread Unused - kept for API compatibility
 	 * 
-	 * @return true if the service is running
+	 * @return true if the service is running (never returns false - exits on failure)
 	 */
 	public boolean ensureDebuggerServiceStarted( ThreadReference thread ) {
 		if ( debuggerServiceStarted ) {
@@ -875,9 +859,9 @@ public class VMController {
 			}
 		}
 
-		// Service not running - BoxLang may not have debugMode enabled
-		LOGGER.warning( "DebuggerService not running. Ensure BoxLang is started with debugMode=true" );
-		return false;
+		// Service not running - this is a fatal error
+		fatalError( "DebuggerService not running" );
+		return false; // Unreachable, but satisfies compiler
 	}
 
 	/**

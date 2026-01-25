@@ -27,6 +27,18 @@ public class InvokeTools {
 
 	private static final Object							invokeLock	= new Object();
 
+	/**
+	 * Fatal error that terminates the debugger.
+	 * Called when the DebuggerService is not available, which is a non-recoverable state.
+	 *
+	 * @param message The error message to log
+	 */
+	private static void fatalError( String message ) {
+		LOGGER.severe( "FATAL: " + message );
+		LOGGER.severe( "The debugger cannot function without the DebuggerService. Ensure BoxLang is started with debugMode=true" );
+		System.exit( 1 );
+	}
+
 	public static ObjectReference createIntegerRef( VMController vmController, int value ) {
 		synchronized ( invokeLock ) {
 			ClassType	integerClass	= ( ClassType ) vmController.vm.classesByName( "java.lang.Integer" ).get( 0 );
@@ -106,14 +118,14 @@ public class InvokeTools {
 	private static Value pollForResult( VMController vmController, String taskId ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerService class not found" );
-			return null;
+			fatalError( "DebuggerService class not found during pollForResult" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
 		if ( debugThread == null ) {
-			LOGGER.severe( "Debug thread not available for pollForResult" );
-			return null;
+			fatalError( "Debug thread not available for pollForResult" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		try {
@@ -148,14 +160,14 @@ public class InvokeTools {
 	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerService class not found for enqueueStatic" );
-			return null;
+			fatalError( "DebuggerService class not found for enqueueStatic" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
 		if ( debugThread == null ) {
-			LOGGER.severe( "Debug thread not available for enqueueStatic" );
-			return null;
+			fatalError( "Debug thread not available for enqueueStatic" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		List<Value> taskArgs = List.of( vmController.vm.mirrorOf( target ), vmController.vm.mirrorOf( methodName ),
@@ -188,14 +200,14 @@ public class InvokeTools {
 	    List<Value> args ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
-			LOGGER.severe( "DebuggerService class not found for enqueueOnObject" );
-			return null;
+			fatalError( "DebuggerService class not found for enqueueOnObject" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		ThreadReference debugThread = vmController.getPreparedDebugInvokeThread();
 		if ( debugThread == null ) {
-			LOGGER.severe( "Debug thread not available for enqueueOnObject" );
-			return null;
+			fatalError( "Debug thread not available for enqueueOnObject" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		List<Value> taskArgs = List.of( target, vmController.vm.mirrorOf( methodName ), convertToMirrorStringArray( vmController, paramTypeNames ),
@@ -270,16 +282,16 @@ public class InvokeTools {
 		ClassType debuggerServiceClass = vmController.getDebuggerServiceClass();
 
 		if ( debuggerServiceClass == null ) {
-			LOGGER.warning( "DebuggerService class not loaded yet" );
-			return null;
+			fatalError( "DebuggerService class not loaded" );
+			return null; // Unreachable, but satisfies compiler
 		}
 
 		// Verify the DebuggerService is running (started by BoxLang when debugMode=true)
 		if ( !vmController.isDebuggerServiceStarted() ) {
 			// Try to detect if it's running by looking for the invoker thread
 			if ( !vmController.ensureDebuggerServiceStarted( null ) ) {
-				LOGGER.severe( "DebuggerService not running. Ensure BoxLang is started with debugMode=true" );
-				return null;
+				fatalError( "DebuggerService not running" );
+				return null; // Unreachable, but satisfies compiler
 			}
 		}
 
