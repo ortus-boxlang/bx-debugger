@@ -96,6 +96,12 @@ public class VMController {
 	private volatile boolean												debuggerServiceStarted			= false;
 	private volatile ClassType												debuggerServiceClass			= null;
 
+	// User code start signal support
+	// When BoxLang is about to execute user code, it calls DebuggerService.signalUserCodeStart()
+	// We use this to enable SUSPEND_EVENT_THREAD for targeted ClassPrepareRequests
+	private volatile boolean												userCodeStarted					= false;
+	private MethodEntryRequest												signalUserCodeStartRequest		= null;
+
 	// Conditional breakpoint support
 	private static final int												CONDITION_EVAL_TIMEOUT_SECONDS	= 30;
 	private final Map<Integer, Integer>										breakpointHitCounts				= new ConcurrentHashMap<>();
@@ -121,6 +127,12 @@ public class VMController {
 	private volatile boolean												firstBoxGeneratedClassSeen		= false;
 	// Track targeted ClassPrepareRequests for files with breakpoints (keyed by normalized file path)
 	private final Map<String, ClassPrepareRequest>							targetedClassPrepareRequests	= new ConcurrentHashMap<>();
+	// Track MethodEntryEvent counts for timing analysis
+	private volatile int													methodEntryEventCount			= 0;
+	private volatile int													debuggerServiceMethodEntryCount	= 0;
+	// Track ClassPrepareEvent counts for timing analysis
+	private volatile int													classPrepareEventCount			= 0;
+	private volatile int													boxgeneratedClassCount			= 0;
 
 	/**
 	 * Set the session start time for timing instrumentation
@@ -329,10 +341,10 @@ public class VMController {
 
 		// Transfer configurationDone state - this is critical because configurationDone
 		// may have been signaled before the VM was ready
-		this.configurationDone = old.configurationDone;
+		this.configurationDone	= old.configurationDone;
 
 		// Transfer session start time for timing instrumentation
-		this.sessionStartTime = old.sessionStartTime;
+		this.sessionStartTime	= old.sessionStartTime;
 
 		if ( vm != null ) {
 			setupClassPrepareEvents();
@@ -547,7 +559,8 @@ public class VMController {
 			return;
 		}
 
-			LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
+		LOGGER.info( "[TIMING] setupClassPrepareEvents() starting at T+" + getElapsedTime() + "ms" );
+		LOGGER.info( "Setting up ClassPrepareRequest before event processing..." );
 		EventRequestManager	requestManager		= vm.eventRequestManager();
 
 		// General listener for all boxgenerated classes with SUSPEND_NONE for performance
@@ -576,11 +589,13 @@ public class VMController {
 		debuggerServicePrepareRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
 		debuggerServicePrepareRequest.setSuspendPolicy( EventRequest.SUSPEND_NONE );
 		debuggerServicePrepareRequest.enable();
+		LOGGER.info( "[TIMING] setupClassPrepareEvents() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	/**
 	 * Create a targeted ClassPrepareRequest for a specific file path.
-	 * This uses SUSPEND_EVENT_THREAD to ensure breakpoints can be set before code executes.
+	 * Before userCodeStarted, uses SUSPEND_NONE to avoid suspending during BoxLang initialization.
+	 * After userCodeStarted, uses SUSPEND_EVENT_THREAD to ensure breakpoints can be set before code executes.
 	 * The class filter pattern is derived from the file path.
 	 *
 	 * @param filePath The source file path to create a targeted request for
@@ -600,14 +615,64 @@ public class VMController {
 			return;
 		}
 
-		EventRequestManager		requestManager	= vm.eventRequestManager();
-		ClassPrepareRequest		request			= requestManager.createClassPrepareRequest();
+		EventRequestManager	requestManager	= vm.eventRequestManager();
+		ClassPrepareRequest	request			= requestManager.createClassPrepareRequest();
 		request.addClassFilter( classPattern );
-		request.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+
+		// Before userCodeStarted, use SUSPEND_NONE to avoid blocking during BoxLang init
+		// After userCodeStarted, use SUSPEND_EVENT_THREAD to properly set breakpoints
+		if ( userCodeStarted ) {
+			request.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+			LOGGER.info( "Created targeted ClassPrepareRequest for " + filePath + " with pattern: " + classPattern + " (SUSPEND_EVENT_THREAD)" );
+		} else {
+			request.setSuspendPolicy( EventRequest.SUSPEND_NONE );
+			LOGGER.info( "Created targeted ClassPrepareRequest for " + filePath + " with pattern: " + classPattern
+			    + " (SUSPEND_NONE - will upgrade after signalUserCodeStart)" );
+		}
 		request.enable();
 
 		targetedClassPrepareRequests.put( filePath, request );
-		LOGGER.info( "Created targeted ClassPrepareRequest for " + filePath + " with pattern: " + classPattern );
+	}
+
+	/**
+	 * Recreate all targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD policy.
+	 * This is called when signalUserCodeStart is received, indicating that BoxLang
+	 * initialization is complete and user code is about to run.
+	 *
+	 * The previous SUSPEND_NONE requests are deleted and replaced with SUSPEND_EVENT_THREAD
+	 * requests to ensure we can properly set breakpoints when user code classes are loaded.
+	 */
+	private void recreateTargetedClassPrepareRequestsWithSuspend() {
+		if ( vm == null || targetedClassPrepareRequests.isEmpty() ) {
+			return;
+		}
+
+		LOGGER.info( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() starting at T+" + getElapsedTime() + "ms" );
+		LOGGER.info( "Recreating " + targetedClassPrepareRequests.size() + " targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD" );
+
+		EventRequestManager	requestManager	= vm.eventRequestManager();
+
+		// Collect all file paths that have targeted requests
+		List<String>		filePaths		= new ArrayList<>( targetedClassPrepareRequests.keySet() );
+
+		// Delete all existing targeted requests
+		for ( String filePath : filePaths ) {
+			ClassPrepareRequest oldRequest = targetedClassPrepareRequests.remove( filePath );
+			if ( oldRequest != null ) {
+				try {
+					oldRequest.disable();
+					requestManager.deleteEventRequest( oldRequest );
+				} catch ( Exception e ) {
+					LOGGER.fine( "Error removing old ClassPrepareRequest: " + e.getMessage() );
+				}
+			}
+		}
+
+		// Recreate with SUSPEND_EVENT_THREAD (userCodeStarted is now true)
+		for ( String filePath : filePaths ) {
+			createTargetedClassPrepareRequest( filePath );
+		}
+		LOGGER.info( "[TIMING] recreateTargetedClassPrepareRequestsWithSuspend() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	/**
@@ -631,7 +696,7 @@ public class VMController {
 	/**
 	 * Convert a file path to a BoxLang class pattern for ClassPrepareRequest filtering.
 	 * BoxLang generates class names like:
-	 *   boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
+	 * boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs
 	 *
 	 * BoxLang naming conventions:
 	 * - Directory components are lowercased
@@ -639,7 +704,9 @@ public class VMController {
 	 * - Hyphens are replaced with double underscores
 	 *
 	 * @param filePath The source file path (e.g., /Users/elpete/Developer/github/ortus-boxlang/bx-debugger/src/test/resources/main.bxs)
-	 * @return A class pattern for matching (e.g., boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main*)
+	 * 
+	 * @return A class pattern for matching (e.g.,
+	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main*)
 	 */
 	private String filePathToClassPattern( String filePath ) {
 		if ( filePath == null || filePath.isEmpty() ) {
@@ -656,12 +723,12 @@ public class VMController {
 
 		// Split into directory and filename
 		// BoxLang lowercases directory components but preserves filename case
-		int lastSlash = normalizedPath.lastIndexOf( '/' );
-		String directory = lastSlash > 0 ? normalizedPath.substring( 0, lastSlash ) : "";
-		String filename = lastSlash > 0 ? normalizedPath.substring( lastSlash + 1 ) : normalizedPath;
+		int		lastSlash	= normalizedPath.lastIndexOf( '/' );
+		String	directory	= lastSlash > 0 ? normalizedPath.substring( 0, lastSlash ) : "";
+		String	filename	= lastSlash > 0 ? normalizedPath.substring( lastSlash + 1 ) : normalizedPath;
 
 		// Remove file extension from filename (.bxs, .bxm, .bx, .cfc, .cfm, .cfs)
-		int dotIndex = filename.lastIndexOf( '.' );
+		int		dotIndex	= filename.lastIndexOf( '.' );
 		if ( dotIndex > 0 ) {
 			String extension = filename.substring( dotIndex ).toLowerCase();
 			if ( extension.equals( ".bxs" ) || extension.equals( ".bxm" ) || extension.equals( ".bx" ) ||
@@ -672,14 +739,14 @@ public class VMController {
 
 		// Convert directory to lowercase, replace / with . and - with __
 		// BoxLang lowercases directory components in generated class names
-		String directoryPattern = directory
+		String	directoryPattern	= directory
 		    .replace( "/", "." )
 		    .replace( "-", "__" )
 		    .toLowerCase();
 
 		// Filename: capitalize first letter (BoxLang does this), replace - with __
 		// BoxLang capitalizes the first letter of the filename in generated class names
-		String filenamePattern = filename.replace( "-", "__" );
+		String	filenamePattern		= filename.replace( "-", "__" );
 		if ( !filenamePattern.isEmpty() ) {
 			filenamePattern = Character.toUpperCase( filenamePattern.charAt( 0 ) ) + filenamePattern.substring( 1 );
 		}
@@ -695,6 +762,7 @@ public class VMController {
 	 * Check if there are any verified breakpoints for a given file path.
 	 *
 	 * @param filePath The file path to check
+	 * 
 	 * @return true if there are verified breakpoints for this file
 	 */
 	private boolean hasVerifiedBreakpointsForFile( String filePath ) {
@@ -1432,9 +1500,18 @@ public class VMController {
 		var	className	= event.location().declaringType().name();
 		var	methodName	= event.location().method().name();
 
+		methodEntryEventCount++;
 		LOGGER.fine( "Handling MethodEntryEvent for " + className + "." + methodName );
 
 		if ( className.equalsIgnoreCase( "ortus.boxlang.runtime.services.DebuggerService" ) ) {
+			debuggerServiceMethodEntryCount++;
+			LOGGER.info( "[TIMING] DebuggerService." + methodName + "() entry #" + debuggerServiceMethodEntryCount + " at T+" + getElapsedTime() + "ms" );
+			// Handle signalUserCodeStart - this signals that BoxLang is about to run user code
+			if ( methodName.equals( "signalUserCodeStart" ) ) {
+				handleSignalUserCodeStart( event );
+				return;
+			}
+
 			if ( !methodName.equals( "debuggerHook" ) ) {
 				event.thread().resume();
 				return;
@@ -1481,6 +1558,42 @@ public class VMController {
 		}
 
 		f.complete( getDebugThread() );
+	}
+
+	/**
+	 * Handle the signalUserCodeStart event from BoxLang.
+	 * This is called when BoxLang is about to execute user code (templates, scripts, etc.).
+	 * We use this as the trigger to enable SUSPEND_EVENT_THREAD for targeted ClassPrepareRequests.
+	 *
+	 * @param event The MethodEntryEvent for signalUserCodeStart
+	 */
+	private void handleSignalUserCodeStart( MethodEntryEvent event ) {
+		if ( userCodeStarted ) {
+			// Already processed - just resume the thread
+			LOGGER.fine( "[TIMING] signalUserCodeStart already processed, resuming at T+" + getElapsedTime() + "ms" );
+			event.thread().resume();
+			return;
+		}
+
+		LOGGER.info( "[TIMING] signalUserCodeStart received at T+" + getElapsedTime() + "ms - enabling breakpoint suspension" );
+		LOGGER.info( "[TIMING] Total MethodEntryEvents so far: " + methodEntryEventCount + ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
+		userCodeStarted = true;
+
+		// Disable the signalUserCodeStart request - we only need to catch it once
+		if ( signalUserCodeStartRequest != null ) {
+			signalUserCodeStartRequest.disable();
+			vm.eventRequestManager().deleteEventRequest( signalUserCodeStartRequest );
+			signalUserCodeStartRequest = null;
+			LOGGER.fine( "Disabled signalUserCodeStart MethodEntryRequest" );
+		}
+
+		// Recreate targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD
+		// This is the key optimization - before this point, we used SUSPEND_NONE to avoid
+		// suspending on every class load during BoxLang initialization
+		recreateTargetedClassPrepareRequestsWithSuspend();
+
+		// Resume the thread to continue execution
+		event.thread().resume();
 	}
 
 	/**
@@ -1549,6 +1662,10 @@ public class VMController {
 				client.stopped( stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
 				LOGGER.info( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
+				LOGGER.info( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
+				    ", boxgenerated classes: " + boxgeneratedClassCount +
+				    ", MethodEntryEvents: " + methodEntryEventCount +
+				    ", DebuggerService entries: " + debuggerServiceMethodEntryCount );
 			}
 
 		} catch ( Exception e ) {
@@ -1943,13 +2060,14 @@ public class VMController {
 	 */
 	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
+		classPrepareEventCount++;
 
 		// Check if this is the DebuggerService class - mark it as available
 		// Note: We don't call startDebuggerService() here because invokeMethod()
 		// blocks and would hang the event processing loop. Instead, we defer the
 		// start to when we actually need to invoke methods via InvokeTools.
 		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerServiceStarted ) {
-			LOGGER.info( "DebuggerService class loaded - will start service on first method invocation" );
+			LOGGER.info( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms - will start service on first method invocation" );
 			// Store the class type for later use
 			this.debuggerServiceClass = ( ClassType ) refType;
 		}
@@ -1962,10 +2080,15 @@ public class VMController {
 
 		// Log boxgenerated classes at fine level to reduce overhead
 		if ( refType.name().startsWith( "boxgenerated." ) ) {
+			boxgeneratedClassCount++;
 			LOGGER.fine( "BoxLang generated class loaded: " + refType.name() );
 			if ( !firstBoxGeneratedClassSeen ) {
 				firstBoxGeneratedClassSeen = true;
 				LOGGER.info( "[TIMING] First boxgenerated class at T+" + getElapsedTime() + "ms (BoxLang runtime init complete)" );
+			}
+			// Log every 10th boxgenerated class to track progress without flooding logs
+			if ( boxgeneratedClassCount % 10 == 0 ) {
+				LOGGER.info( "[TIMING] boxgenerated class #" + boxgeneratedClassCount + " loaded at T+" + getElapsedTime() + "ms: " + refType.name() );
 			}
 		}
 
@@ -1977,7 +2100,8 @@ public class VMController {
 			if ( trySetBreakpointOnSpecificClass( refType, pending.breakpointId, pending.filePath, pending.lineNumber,
 			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
 				toRemove.add( pending );
-				LOGGER.fine( "Successfully set pending breakpoint at " + pending.filePath + ":" + pending.lineNumber );
+				LOGGER.info( "[TIMING] Successfully set breakpoint at " + pending.filePath + ":" + pending.lineNumber +
+				    " at T+" + getElapsedTime() + "ms on class " + refType.name() );
 			}
 		}
 
@@ -2493,18 +2617,49 @@ public class VMController {
 	}
 
 	private void setupMethodEntryRequest() {
-		this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequest.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
-		this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		// this.methodEntryRequest.enable();
-		LOGGER.info( "Set up method entry request for DebuggerService" );
+		LOGGER.info( "[TIMING] setupMethodEntryRequest() starting at T+" + getElapsedTime() + "ms" );
 
-		// create other debug thread request
-		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
-		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		this.methodEntryRequestDebugger.enable();
-		LOGGER.info( "Set up method entry request for DebuggerService invoker thread" );
+		// PERFORMANCE EXPERIMENT: Disable ALL MethodEntryRequests to test if they cause the ~19s delay
+		// The hypothesis is that even with class filters, JDI checks every method entry against these requests,
+		// causing massive overhead during BoxLang class loading.
+
+		// Original code - disabled for performance testing:
+		// this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
+		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
+		// this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		// // this.methodEntryRequest.enable();
+		// LOGGER.info( "Set up method entry request for DebuggerService" );
+
+		// // create other debug thread request
+		// this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
+		// this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
+		// this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		// this.methodEntryRequestDebugger.enable();
+		// LOGGER.info( "Set up method entry request for DebuggerService invoker thread" );
+
+		// // Set up MethodEntryRequest for signalUserCodeStart
+		// // This is called by BoxRuntime just before executing user templates/scripts
+		// // We use this to enable SUSPEND_EVENT_THREAD for targeted ClassPrepareRequests
+		// this.signalUserCodeStartRequest = vm.eventRequestManager().createMethodEntryRequest();
+		// this.signalUserCodeStartRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
+		// this.signalUserCodeStartRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		// this.signalUserCodeStartRequest.enable();
+		// LOGGER.info( "Set up method entry request for DebuggerService.signalUserCodeStart" );
+
+		LOGGER.info( "[PERF TEST] All MethodEntryRequests for DebuggerService DISABLED" );
+
+		// With MethodEntryRequests disabled, we need an alternative for signalUserCodeStart.
+		// Option 1: Set userCodeStarted = true immediately (assume user code starts right away)
+		// Option 2: Use a ClassPrepareRequest on boxgenerated.* with SUSPEND_EVENT_THREAD from the start
+		// For this test, we'll use Option 1 to see if MethodEntryRequests were the bottleneck
+		userCodeStarted = true;
+		LOGGER.info( "[PERF TEST] userCodeStarted set to true immediately (bypassing signalUserCodeStart)" );
+
+		// IMPORTANT: Recreate any targeted ClassPrepareRequests that were created before we set userCodeStarted.
+		// They were created with SUSPEND_NONE, but now need SUSPEND_EVENT_THREAD to catch user code.
+		recreateTargetedClassPrepareRequestsWithSuspend();
+
+		LOGGER.info( "[TIMING] setupMethodEntryRequest() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	private CompletableFuture<Value> getRuntime() {

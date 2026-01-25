@@ -140,10 +140,13 @@ public class BoxDebugger {
 
 	private static void handleClient( SocketChannel clientSocket ) {
 		try {
+			LOGGER.info( "Creating debug server instance..." );
 			// Create the debug server instance
-			BoxDebugServer					debugServer	= new BoxDebugServer();
+			BoxDebugServer debugServer = new BoxDebugServer();
+			LOGGER.info( "Debug server instance created successfully" );
+			LOGGER.info( "Client socket open: " + clientSocket.isOpen() + ", connected: " + clientSocket.isConnected() );
 
-			Launcher<IDebugProtocolClient>	launcher	= null;
+			Launcher<IDebugProtocolClient> launcher = null;
 
 			if ( System.getProperty( "teeDAPInput" ) != null ) {
 				String				timestamp		= new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
@@ -164,6 +167,7 @@ public class BoxDebugger {
 				    clientSocket.socket().getOutputStream()
 				);
 			} else {
+				LOGGER.info( "Creating DSP launcher..." );
 				launcher = DSPLauncher.createServerLauncher(
 				    debugServer,
 				    clientSocket.socket().getInputStream(),
@@ -171,16 +175,23 @@ public class BoxDebugger {
 				);
 			}
 
+			LOGGER.info( "Connecting debug server to client..." );
 			// Connect the debug server to the client
 			debugServer.connect( launcher.getRemoteProxy() );
 
-			LOGGER.info( "Debug session started" );
+			LOGGER.info( "Debug session started, waiting for requests..." );
 
 			// Start listening for requests
 			launcher.startListening().get();
 
+			LOGGER.info( "Launcher listening completed normally" );
+
 		} catch ( Exception e ) {
-			LOGGER.severe( "Error in debug session: " + e.getMessage() );
+			LOGGER.severe( "Error in debug session: " + e.getClass().getName() + ": " + e.getMessage() );
+			if ( e.getCause() != null ) {
+				LOGGER.severe( "Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage() );
+			}
+			e.printStackTrace();
 		} finally {
 			try {
 				clientSocket.close();

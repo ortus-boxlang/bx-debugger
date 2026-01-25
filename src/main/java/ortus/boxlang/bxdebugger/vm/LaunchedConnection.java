@@ -47,8 +47,10 @@ public class LaunchedConnection implements IVMConnection {
 		String							classpath			= System.getProperty( "java.class.path" );
 		arguments.get( "options" ).setValue( "-cp \"" + classpath + "\"" );
 
+		// Launch with --bx-debug to enable debug mode in BoxLang
+		// This is required for signalUserCodeStart to be called before user code execution
 		StringBuilder command = new StringBuilder();
-		command.append( "ortus.boxlang.runtime.BoxRunner " + program );
+		command.append( "ortus.boxlang.runtime.BoxRunner --bx-debug " + program );
 
 		arguments.get( "main" ).setValue( command.toString() );
 
