@@ -19,6 +19,17 @@
             "args": "9898"
         },
         {
+            "type": "java",
+            "name": "BoxDebugger - Local JARs",
+            "request": "launch",
+            "mainClass": "ortus.boxlang.bxdebugger.BoxDebugger",
+            "args": "9898",
+            "classPaths": [
+                "${workspaceFolder}/build/libs/*",
+                "${workspaceFolder}/../boxlang/build/libs/*"
+            ]
+        },
+        {
             "type": "boxlang",
             "name": "BoxDebugger - Run BoxLang File",
             "request": "launch",
