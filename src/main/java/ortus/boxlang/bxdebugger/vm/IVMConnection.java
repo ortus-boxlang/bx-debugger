@@ -42,9 +42,9 @@ public interface IVMConnection {
 			// Find the DebuggerService class
 			List<ReferenceType>	classes	= vm.classesByName( DEBUGGER_SERVICE_CLASS );
 			if ( classes.isEmpty() ) {
-				logger.warning( "DebuggerService class not found in target VM. "
-				    + "Ensure BoxLang runtime is loaded." );
-				return;
+				logger.severe( "DebuggerService class not found in target VM. "
+				    + "Ensure BoxLang runtime is loaded and in debugMode." );
+				System.exit(1);
 			}
 
 			ClassType		debuggerServiceClass	= ( ClassType ) classes.get( 0 );
@@ -53,7 +53,7 @@ public interface IVMConnection {
 			List<Method>	startMethods			= debuggerServiceClass.methodsByName( "start" );
 			if ( startMethods.isEmpty() ) {
 				logger.severe( "DebuggerService.start() method not found" );
-				return;
+				System.exit(1);
 			}
 
 			Method			startMethod		= startMethods.get( 0 );
