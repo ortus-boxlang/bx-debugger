@@ -34,7 +34,11 @@ public class CommandBoxConnection implements IVMConnection {
 		this.serverInfo	= parseCommandBoxServerInfo( serverName );
 		this.vm			= attachToVM( serverInfo.host, serverInfo.port );
 
-		IVMConnection.startDebuggerService( this );
+		// BoxLang now starts the DebuggerService automatically when debugMode=true
+		// Just verify it's running
+		if ( !IVMConnection.isDebuggerServiceStarted( this.vm ) ) {
+			LOGGER.warning( "DebuggerService not detected. Ensure BoxLang is started with debugMode=true" );
+		}
 	}
 
 	@Override

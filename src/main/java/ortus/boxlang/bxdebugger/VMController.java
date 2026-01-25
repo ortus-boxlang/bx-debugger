@@ -779,79 +779,63 @@ public class VMController {
 	 * Start the DebuggerService in the target VM.
 	 * This is called when the DebuggerService class is loaded (via ClassPrepareEvent).
 	 * The service creates the invoker and worker threads needed for JDI method invocations.
-	 *
-	 * @param thread               The suspended thread from the ClassPrepareEvent
-	 * @param debuggerServiceClass The DebuggerService class type
+	 * As of the refactoring, BoxLang now starts the DebuggerService automatically when
+	 * debugMode is enabled, so this method just detects if the service is running.
 	 */
+
 	/**
-	 * Start the DebuggerService in the target VM.
-	 * This is called when we need to invoke methods via JDI and the service hasn't been started yet.
-	 * Must be called from a properly suspended thread context.
+	 * Check if the DebuggerService is running in the target VM by looking for the invoker thread.
+	 * BoxLang starts the DebuggerService automatically when debugMode is enabled.
 	 *
-	 * @param thread               The suspended thread from the ClassPrepareEvent
-	 * @param debuggerServiceClass The DebuggerService class type
+	 * @return true if the invoker thread is found (service is running)
 	 */
-	private void startDebuggerService( ThreadReference thread, ClassType debuggerServiceClass ) {
+	private boolean detectDebuggerServiceRunning() {
 		if ( debuggerServiceStarted ) {
-			LOGGER.info( "DebuggerService already started" );
-			return;
+			return true;
 		}
 
-		try {
-			// Find the start() method
-			List<com.sun.jdi.Method> startMethods = debuggerServiceClass.methodsByName( "start" );
-			if ( startMethods.isEmpty() ) {
-				LOGGER.severe( "DebuggerService.start() method not found" );
-				return;
+		// Look for the invoker thread - its presence indicates the service is running
+		for ( ThreadReference thread : vm.allThreads() ) {
+			if ( thread.name().equals( "BoxLang-DebuggerInvoker" ) ) {
+				debuggerServiceStarted = true;
+				LOGGER.info( "DebuggerService detected as running (invoker thread found)" );
+				return true;
 			}
-
-			com.sun.jdi.Method startMethod = startMethods.get( 0 );
-
-			// Invoke DebuggerService.start() on the suspended thread
-			debuggerServiceClass.invokeMethod(
-			    thread,
-			    startMethod,
-			    java.util.Collections.emptyList(),
-			    ObjectReference.INVOKE_SINGLE_THREADED
-			);
-
-			debuggerServiceStarted = true;
-			LOGGER.info( "DebuggerService started successfully in target VM" );
-
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.warning( "Could not start DebuggerService - thread not in compatible state: " + e.getMessage() );
-		} catch ( Exception e ) {
-			LOGGER.warning( "Could not start DebuggerService: " + e.getMessage() );
 		}
+
+		return false;
 	}
 
 	/**
-	 * Lazily start the DebuggerService when needed.
-	 * This method is called from InvokeTools when we need to invoke methods.
-	 * It uses the provided suspended thread to start the service.
+	 * Ensure the DebuggerService is available for method invocations.
+	 * BoxLang starts the DebuggerService automatically when debugMode is enabled,
+	 * so this method just verifies the service is running.
 	 *
-	 * @param thread A properly suspended thread reference
+	 * @param thread Unused - kept for API compatibility
 	 * 
-	 * @return true if the service is started or was already started
+	 * @return true if the service is running
 	 */
 	public boolean ensureDebuggerServiceStarted( ThreadReference thread ) {
 		if ( debuggerServiceStarted ) {
 			return true;
 		}
 
+		// Detect if the service is already running (started by BoxLang)
+		if ( detectDebuggerServiceRunning() ) {
+			return true;
+		}
+
+		// Try to find the DebuggerService class
 		if ( debuggerServiceClass == null ) {
-			// Try to find the class if it's been loaded
 			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
 			if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
 				debuggerServiceClass = ct;
-			} else {
-				LOGGER.warning( "DebuggerService class not loaded yet" );
-				return false;
 			}
 		}
 
-		startDebuggerService( thread, debuggerServiceClass );
-		return debuggerServiceStarted;
+		// Service not running - BoxLang may not have debugMode enabled
+		LOGGER.warning( "DebuggerService not running. Ensure BoxLang is started with debugMode=true" );
+		return false;
 	}
 
 	/**
@@ -2062,14 +2046,15 @@ public class VMController {
 		ReferenceType refType = event.referenceType();
 		classPrepareEventCount++;
 
-		// Check if this is the DebuggerService class - mark it as available
-		// Note: We don't call startDebuggerService() here because invokeMethod()
-		// blocks and would hang the event processing loop. Instead, we defer the
-		// start to when we actually need to invoke methods via InvokeTools.
+		// Check if this is the DebuggerService class - store it for later use.
+		// BoxLang now starts the DebuggerService automatically when debugMode=true,
+		// so we just need to track when the class is loaded.
 		if ( refType.name().equals( DEBUGGER_SERVICE_CLASS ) && !debuggerServiceStarted ) {
-			LOGGER.fine( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms - will start service on first method invocation" );
+			LOGGER.fine( "[TIMING] DebuggerService class loaded at T+" + getElapsedTime() + "ms" );
 			// Store the class type for later use
 			this.debuggerServiceClass = ( ClassType ) refType;
+			// Check if the service is already running (started by BoxLang)
+			detectDebuggerServiceRunning();
 		}
 
 		// Check if this is the BoxRuntimeException class and we have exception breakpoints enabled

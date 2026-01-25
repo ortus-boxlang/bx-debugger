@@ -274,55 +274,15 @@ public class InvokeTools {
 			return null;
 		}
 
-		// Ensure the DebuggerService.start() has been called
+		// Verify the DebuggerService is running (started by BoxLang when debugMode=true)
 		if ( !vmController.isDebuggerServiceStarted() ) {
-			// We need a suspended thread to call start()
-			// First try to get a breakpoint thread, then fall back to debug thread
-			ThreadReference startThread = findSuspendedThread( vmController );
-			if ( startThread != null ) {
-				LOGGER.info( "Starting DebuggerService using thread: " + startThread.name() );
-				if ( !vmController.ensureDebuggerServiceStarted( startThread ) ) {
-					LOGGER.severe( "Failed to start DebuggerService" );
-					return null;
-				}
-				// After starting, give a moment for the invoker thread to be created
-				try {
-					Thread.sleep( 200 );
-				} catch ( InterruptedException e ) {
-					Thread.currentThread().interrupt();
-				}
-			} else {
-				LOGGER.warning( "No suspended thread available to start DebuggerService" );
+			// Try to detect if it's running by looking for the invoker thread
+			if ( !vmController.ensureDebuggerServiceStarted( null ) ) {
+				LOGGER.severe( "DebuggerService not running. Ensure BoxLang is started with debugMode=true" );
 				return null;
 			}
 		}
 
 		return debuggerServiceClass;
-	}
-
-	/**
-	 * Find any suspended thread we can use to invoke methods.
-	 * Prefers breakpoint threads over the debug invoker thread.
-	 */
-	private static ThreadReference findSuspendedThread( VMController vmController ) {
-		// First look for any suspended thread that isn't the debugger invoker/worker
-		for ( ThreadReference thread : vmController.vm.allThreads() ) {
-			if ( thread.isSuspended() &&
-			    !thread.name().equals( "BoxLang-DebuggerInvoker" ) &&
-			    !thread.name().equals( "BoxLang-DebuggerWorker" ) ) {
-				LOGGER.fine( "Found suspended thread for DebuggerService start: " + thread.name() );
-				return thread;
-			}
-		}
-
-		// Fall back to main thread if it's suspended
-		for ( ThreadReference thread : vmController.vm.allThreads() ) {
-			if ( thread.name().equals( "main" ) && thread.isSuspended() ) {
-				LOGGER.fine( "Using main thread for DebuggerService start" );
-				return thread;
-			}
-		}
-
-		return null;
 	}
 }
