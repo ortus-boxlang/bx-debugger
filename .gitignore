@@ -8,6 +8,11 @@ bin/**
 ### IntelliJ IDEA ###
 .idea/
 
+### Eclipse ###
+.classpath
+.project
+.settings/
+
 ### Mac OS ###
 .DS_Store
 
@@ -16,4 +21,3 @@ bin/**
 src/test/resources/libs/*
 !src/test/resources/libs/.gitkeep
 src/test/resources/boxlang_home
-.project
