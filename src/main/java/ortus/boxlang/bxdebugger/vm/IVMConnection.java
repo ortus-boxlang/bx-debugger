@@ -141,19 +141,4 @@ public interface IVMConnection {
 	 */
 	public VirtualMachine getVirtualMachine();
 
-	/**
-	 * Get the attach virtual machine for this connection.
-	 * This is used for agent loading (deprecated - no longer needed).
-	 *
-	 * @return The attach VirtualMachine
-	 *
-	 * @throws AttachNotSupportedException if attach is not supported
-	 * @throws IOException                 if an I/O error occurs
-	 *
-	 * @deprecated The agent loading mechanism is no longer used.
-	 *             Use {@link #startDebuggerService(IVMConnection)} instead.
-	 */
-	@Deprecated
-	public com.sun.tools.attach.VirtualMachine getAttachVirtualMachine() throws AttachNotSupportedException, IOException;
-
 }
