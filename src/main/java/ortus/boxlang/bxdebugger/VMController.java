@@ -2642,51 +2642,21 @@ public class VMController {
 	private void setupMethodEntryRequest() {
 		LOGGER.fine( "[TIMING] setupMethodEntryRequest() starting at T+" + getElapsedTime() + "ms" );
 
-		// PERFORMANCE EXPERIMENT: Disable ALL MethodEntryRequests to test if they cause the ~19s delay
-		// The hypothesis is that even with class filters, JDI checks every method entry against these requests,
-		// causing massive overhead during BoxLang class loading.
+		// MethodEntryRequests are not created at startup to avoid performance overhead.
+		// Instead, pauseDebugThread() creates a targeted MethodEntryRequest for DebuggerService.debuggerHook()
+		// only when needed for JDI method invocations (e.g., evaluating watch expressions).
 
-		// Original code - disabled for performance testing:
-		// this.methodEntryRequest = vm.eventRequestManager().createMethodEntryRequest();
-		// this.methodEntryRequest.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
-		// this.methodEntryRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		// // this.methodEntryRequest.enable();
-		// LOGGER.info( "Set up method entry request for DebuggerService" );
-
-		// // create other debug thread request
-		// this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
-		// this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.runtime.services.DebuggerService" );
-		// this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		// this.methodEntryRequestDebugger.enable();
-		// LOGGER.info( "Set up method entry request for DebuggerService invoker thread" );
-
-		// // Set up MethodEntryRequest for signalUserCodeStart
-		// // This is called by BoxRuntime just before executing user templates/scripts
-		// // We use this to enable SUSPEND_EVENT_THREAD for targeted ClassPrepareRequests
-		// this.signalUserCodeStartRequest = vm.eventRequestManager().createMethodEntryRequest();
-		// this.signalUserCodeStartRequest.addClassFilter( DEBUGGER_SERVICE_CLASS );
-		// this.signalUserCodeStartRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		// this.signalUserCodeStartRequest.enable();
-		// LOGGER.info( "Set up method entry request for DebuggerService.signalUserCodeStart" );
-
-		LOGGER.fine( "[PERF TEST] All MethodEntryRequests for DebuggerService DISABLED" );
-
-		// With MethodEntryRequests disabled, we need an alternative for signalUserCodeStart.
-		// Option 1: Set userCodeStarted = true immediately (assume user code starts right away)
-		// Option 2: Use a ClassPrepareRequest on boxgenerated.* with SUSPEND_EVENT_THREAD from the start
-		// For this test, we'll use Option 1 to see if MethodEntryRequests were the bottleneck
+		// Set userCodeStarted = true immediately since we don't use signalUserCodeStart detection
 		userCodeStarted = true;
-		LOGGER.fine( "[PERF TEST] userCodeStarted set to true immediately (bypassing signalUserCodeStart)" );
 
-		// IMPORTANT: Recreate any targeted ClassPrepareRequests that were created before we set userCodeStarted.
-		// They were created with SUSPEND_NONE, but now need SUSPEND_EVENT_THREAD to catch user code.
+		// Recreate any targeted ClassPrepareRequests with SUSPEND_EVENT_THREAD
+		// since user code may be about to run
 		recreateTargetedClassPrepareRequestsWithSuspend();
 
 		LOGGER.fine( "[TIMING] setupMethodEntryRequest() completed at T+" + getElapsedTime() + "ms" );
 	}
 
 	private CompletableFuture<Value> getRuntime() {
-
 		return InvokeTools.submitAndInvokeStatic(
 		    this,
 		    "ortus.boxlang.runtime.BoxRuntime",
@@ -2695,26 +2665,4 @@ public class VMController {
 		    new ArrayList<Value>()
 		);
 	}
-
-	// private CompletableFuture<Value> getRuntime() {
-
-	// if ( runtimeFuture == null ) {
-	// runtimeFuture = CompletableFuture.supplyAsync( () -> {
-	// try {
-	// return InvokeTools.submitAndInvokeStatic(
-	// this,
-	// "ortus.boxlang.runtime.BoxRuntime",
-	// "getInstance",
-	// new ArrayList<String>(),
-	// new ArrayList<Value>()
-	// ).get();
-	// } catch ( Exception e ) {
-	// LOGGER.severe( "Error getting BoxRuntime instance: " + e.getMessage() );
-	// return null;
-	// }
-	// } );
-	// }
-
-	// return runtimeFuture;
-	// }
 }
