@@ -85,8 +85,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IVMConnection									vmConnection			= null;
 	private boolean											falseExit				= false;
 
-	// Track launch completion for coordinating with configurationDone
+	// Track launch/attach completion for coordinating with configurationDone
 	private volatile CompletableFuture<Void>				launchFuture			= null;
+	private volatile CompletableFuture<Void>				attachFuture			= null;
 
 	// Timing instrumentation
 	private long											sessionStartTime		= 0;
@@ -198,56 +199,87 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<Void> attach( Map<String, Object> args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			if ( vm != null ) {
-				LOGGER.warning( "Attach requested but VM already present" );
-				return null;
-			}
-			String	serverName	= ( String ) args.getOrDefault( "serverName", "" );
-			int		port		= ( int ) ( ( Double ) args.getOrDefault( "serverPort", "0" ) ).doubleValue();
-			// int port = ( int ) Double.parseDouble( strPort );
+		// Create the future first so configurationDone can wait for it
+		CompletableFuture<Void> future = new CompletableFuture<>();
+		this.attachFuture = future;
 
-			if ( serverName.isEmpty() && port == 0 ) {
-				LOGGER.warning( "Attach requested but neither serverName nor serverPort is provided" );
-				return null;
-			}
-
-			configureDebugSettings( args );
-
+		CompletableFuture.runAsync( () -> {
 			try {
-				if ( port > 0 ) {
-					this.vmConnection = new ortus.boxlang.bxdebugger.vm.BareJDWPConnection( "localhost", port );
-				} else {
-					this.vmConnection = new ortus.boxlang.bxdebugger.vm.CommandBoxConnection( serverName );
+				if ( vm != null ) {
+					LOGGER.warning( "Attach requested but VM already present" );
+					future.complete( null );
+					return;
 				}
-				this.vm = vmConnection.getVirtualMachine();
+				String	serverName	= ( String ) args.getOrDefault( "serverName", "" );
+				int		port		= ( int ) ( ( Double ) args.getOrDefault( "serverPort", "0" ) ).doubleValue();
+				// int port = ( int ) Double.parseDouble( strPort );
+
+				if ( serverName.isEmpty() && port == 0 ) {
+					LOGGER.warning( "Attach requested but neither serverName nor serverPort is provided" );
+					future.complete( null );
+					return;
+				}
+
+				configureDebugSettings( args );
+
+				try {
+					if ( port > 0 ) {
+						this.vmConnection = new ortus.boxlang.bxdebugger.vm.BareJDWPConnection( "localhost", port );
+					} else {
+						this.vmConnection = new ortus.boxlang.bxdebugger.vm.CommandBoxConnection( serverName );
+					}
+					this.vm = vmConnection.getVirtualMachine();
+				} catch ( Exception e ) {
+					LOGGER.severe( "Failed to attach to VM: " + e.getMessage() );
+					e.printStackTrace();
+					sendOutput( "Error: Failed to attach to VM: " + e.getMessage(), "stderr" );
+					future.complete( null );
+					return;
+				}
+
+				// Initialize breakpoint manager
+				if ( vmController == null ) {
+					vmController = new VMController( vm, client );
+					vmController.setSessionStartTime( sessionStartTime );
+				} else {
+					// If you want to migrate pending breakpoints (mirrors launch logic)
+					VMController old = vmController;
+					vmController = new VMController( old, vm, client );
+					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
+				}
+
+				// Start event processing so we can catch ClassPrepareEvents for breakpoints
+				vmController.startEventProcessing();
+
+				// When attaching to an already-running VM, the DebuggerUtil class may have
+				// already been loaded (we won't receive a ClassPrepareEvent for it).
+				// Proactively detect and initialize the DebuggerUtil.
+				if ( !vmController.detectDebuggerUtilOnAttach() ) {
+					LOGGER.warning( "DebuggerUtil not detected - variable evaluation may not work. "
+					    + "Ensure BoxLang is started with debugMode=true (--debug flag for miniserver)" );
+					sendOutput( "Warning: DebuggerUtil not detected. Variable evaluation may not work. "
+					    + "Ensure BoxLang is started with debugMode=true.", "stderr" );
+				}
+
+				// Configure path mapping for remote debugging support
+				if ( pathMappingService != null ) {
+					vmController.setPathMappingService( pathMappingService );
+				}
+
+				this.variableManager = new VariableManager( vmController );
+
+				startOutputMonitoring(); // may be a no-op if remote
+
+				LOGGER.info( "Attach completed successfully, VM is ready" );
+				future.complete( null );
 			} catch ( Exception e ) {
-				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
+				LOGGER.severe( "Attach failed with exception: " + e.getMessage() );
 				e.printStackTrace();
-				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
-
-				return null;
+				future.completeExceptionally( e );
 			}
-
-			// Initialize breakpoint manager
-			if ( vmController == null ) {
-				vmController = new VMController( vm, client );
-			} else {
-				// If you want to migrate pending breakpoints (mirrors launch logic)
-				VMController old = vmController;
-				vmController = new VMController( old, vm, client );
-			}
-
-			// Configure path mapping for remote debugging support
-			if ( pathMappingService != null ) {
-				vmController.setPathMappingService( pathMappingService );
-			}
-
-			this.variableManager = new VariableManager( vmController );
-
-			startOutputMonitoring(); // may be a no-op if remote
-			return null;
 		} );
+
+		return future;
 	}
 
 	@Override
@@ -1016,7 +1048,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			LOGGER.info( "Configuration done request received" );
 			LOGGER.fine( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
-			// Wait for launch to complete before processing configurationDone
+			// Wait for launch or attach to complete before processing configurationDone
 			// This ensures the VM is ready before we try to set breakpoints
 			if ( launchFuture != null ) {
 				try {
@@ -1025,6 +1057,16 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					LOGGER.info( "Launch completed, continuing with configurationDone" );
 				} catch ( Exception e ) {
 					LOGGER.severe( "Failed waiting for launch to complete: " + e.getMessage() );
+					// Continue anyway - the VM might be available
+				}
+			}
+			if ( attachFuture != null ) {
+				try {
+					LOGGER.info( "Waiting for attach to complete before processing configurationDone..." );
+					attachFuture.get( 30, java.util.concurrent.TimeUnit.SECONDS );
+					LOGGER.info( "Attach completed, continuing with configurationDone" );
+				} catch ( Exception e ) {
+					LOGGER.severe( "Failed waiting for attach to complete: " + e.getMessage() );
 					// Continue anyway - the VM might be available
 				}
 			}

@@ -44,6 +44,31 @@
             "serverPort": 9888,
             "localRoot": "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\docker-test",
             "remoteRoot": "/app"
+        },
+        {
+            "type": "boxlang",
+            "name": "Attach to BoxLang Miniserver",
+            "request": "attach",
+            "debugServer": 9898,
+            "serverPort": 5005,
+            "program": "${workspaceFolder}/debug-webroot/index.bxm",
+            "localRoot": "${workspaceFolder}/debug-webroot",
+            "remoteRoot": "${workspaceFolder}/debug-webroot"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Debug Miniserver (Full Stack)",
+            "configurations": [
+                "BoxDebugger - Local JARs"
+            ],
+            "preLaunchTask": "Start BoxLang Miniserver (Debug)",
+            "stopAll": true,
+            "presentation": {
+                "hidden": false,
+                "group": "debug",
+                "order": 1
+            }
         }
     ]
 }

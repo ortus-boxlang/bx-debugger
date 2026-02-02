@@ -894,6 +894,42 @@ public class VMController {
 	}
 
 	/**
+	 * Detect and initialize the DebuggerUtil if it's already loaded in the VM.
+	 * This method should be called when attaching to an already-running VM,
+	 * since the ClassPrepareEvent for DebuggerUtil will have already fired
+	 * before we attached.
+	 *
+	 * @return true if DebuggerUtil was detected and initialized, false otherwise
+	 */
+	public boolean detectDebuggerUtilOnAttach() {
+		if ( vm == null ) {
+			LOGGER.warning( "Cannot detect DebuggerUtil - VM is null" );
+			return false;
+		}
+
+		// First, try to find the DebuggerUtil class if we don't already have it
+		if ( debuggerUtilClass == null ) {
+			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
+			if ( !classes.isEmpty() && classes.get( 0 ) instanceof ClassType ct ) {
+				debuggerUtilClass = ct;
+				LOGGER.info( "DebuggerUtil class detected on attach: " + DEBUGGER_SERVICE_CLASS );
+			} else {
+				LOGGER.warning( "DebuggerUtil class not found in VM - BoxLang may not be running with debugMode=true" );
+				return false;
+			}
+		}
+
+		// Now check if the service is actually running (invoker thread exists)
+		if ( detectDebuggerUtilRunning() ) {
+			LOGGER.info( "DebuggerUtil service is running (detected on attach)" );
+			return true;
+		} else {
+			LOGGER.warning( "DebuggerUtil class is loaded but service is not running - BoxLang may not have debugMode=true" );
+			return false;
+		}
+	}
+
+	/**
 	 * Configure exception breakpoints for BoxLang exceptions
 	 *
 	 * @param caught   true to break on caught exceptions
