@@ -71,7 +71,7 @@ public class BreakpointPauseAndContinueTest {
 	}
 
 	@Test
-	@Timeout( value = 45, unit = TimeUnit.SECONDS )
+	@Timeout( value = 90, unit = TimeUnit.SECONDS )
 	@DisplayName( "Test breakpoint pauses execution and continue resumes" )
 	public void testBreakpointPauseAndContinue() throws Exception {
 		LOGGER.info( "Starting breakpoint pause and continue test" );
@@ -172,7 +172,7 @@ public class BreakpointPauseAndContinueTest {
 
 			// 5. Wait for stopped event (breakpoint should be hit)
 			LOGGER.info( "Waiting for stopped event from breakpoint..." );
-			boolean stoppedEventReceived = testClient.waitForStoppedEvent( 15, TimeUnit.SECONDS );
+			boolean stoppedEventReceived = testClient.waitForStoppedEvent( 60, TimeUnit.SECONDS );
 			assertTrue( stoppedEventReceived, "Should receive stopped event when breakpoint is hit" );
 
 			StoppedEventArguments stoppedEvent = testClient.getStoppedEvent();

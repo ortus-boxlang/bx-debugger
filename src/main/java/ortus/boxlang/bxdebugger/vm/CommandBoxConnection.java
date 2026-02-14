@@ -29,12 +29,28 @@ public class CommandBoxConnection implements IVMConnection {
 	private record CommandBoxServerInfo( String host, Integer port, Long pid ) {
 	}
 
+	/**
+	 * Fatal error that terminates the debugger.
+	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
+	 *
+	 * @param message The error message to log
+	 */
+	private static void fatalError( String message ) {
+		LOGGER.severe( "FATAL: " + message );
+		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
+		System.exit( 1 );
+	}
+
 	public CommandBoxConnection( String serverName ) throws Exception {
 		this.serverName	= serverName;
 		this.serverInfo	= parseCommandBoxServerInfo( serverName );
 		this.vm			= attachToVM( serverInfo.host, serverInfo.port );
 
-		IVMConnection.loadDebugAgent( this );
+		// BoxLang now starts the DebuggerUtil automatically when debugMode=true
+		// Verify it's running - this is required for the debugger to function
+		if ( !IVMConnection.isDebuggerUtilStarted( this.vm ) ) {
+			fatalError( "DebuggerUtil not detected" );
+		}
 	}
 
 	@Override

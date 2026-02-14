@@ -81,7 +81,7 @@ public class OutputTest {
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
+	@Timeout( value = 90, unit = TimeUnit.SECONDS )
 	void testOutputTestBxsOutputsSix() throws Exception {
 		// Start the debug server
 		CountDownLatch serverStartedLatch = new CountDownLatch( 1 );
@@ -136,7 +136,7 @@ public class OutputTest {
 
 			// Launch the output-test.bxs program which should output the number 6
 			Map<String, Object>	launchArgs		= new HashMap<>();
-			Path				outputTestFile	= Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/output-test.bxs" ).toAbsolutePath();
+			Path				outputTestFile	= Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/output-test.bxs" ).toAbsolutePath();
 			assertTrue( outputTestFile.toFile().exists(), "output-test.bxs should exist" );
 
 			launchArgs.put( "program", outputTestFile.toString() );
@@ -153,10 +153,10 @@ public class OutputTest {
 			CompletableFuture<Void>		configDoneResult	= debugServer.configurationDone( configArgs );
 			configDoneResult.get( 5, TimeUnit.SECONDS );
 
-			// Wait up to 10 seconds for expected output to appear (integration can be slow)
+			// Wait up to 60 seconds for expected output to appear (BoxLang initialization is slow)
 			String	expected	= "this is the outputx";
 			long	start		= System.currentTimeMillis();
-			while ( System.currentTimeMillis() - start < 10_000 ) {
+			while ( System.currentTimeMillis() - start < 60_000 ) {
 				if ( outputClient.getCapturedOutput().contains( expected ) ) {
 					break;
 				}

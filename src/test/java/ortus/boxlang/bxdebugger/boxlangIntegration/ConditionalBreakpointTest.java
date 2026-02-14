@@ -150,7 +150,7 @@ public class ConditionalBreakpointTest {
 			// Set a breakpoint with hit condition "3" (stop on 3rd hit)
 			SetBreakpointsArguments	breakpointArgs	= new SetBreakpointsArguments();
 			Source					source			= new Source();
-			Path					testFile		= Paths.get( "src/test/java/ortus/boxlang/moduleslug/boxlangIntegration/conditional-breakpoint-test.bxs" )
+			Path					testFile		= Paths.get( "src/test/java/ortus/boxlang/bxdebugger/boxlangIntegration/conditional-breakpoint-test.bxs" )
 			    .toAbsolutePath();
 			assertTrue( testFile.toFile().exists(), "conditional-breakpoint-test.bxs should exist" );
 

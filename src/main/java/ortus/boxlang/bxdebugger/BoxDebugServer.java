@@ -85,6 +85,12 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IVMConnection									vmConnection			= null;
 	private boolean											falseExit				= false;
 
+	// Track launch completion for coordinating with configurationDone
+	private volatile CompletableFuture<Void>				launchFuture			= null;
+
+	// Timing instrumentation
+	private long											sessionStartTime		= 0;
+
 	public BoxDebugServer() {
 		parseFalseExitProperty();
 	}
@@ -93,8 +99,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Connect to the language client
 	 */
 	public void connect( IDebugProtocolClient client ) {
-		this.client = client;
+		this.client				= client;
+		this.sessionStartTime	= System.currentTimeMillis();
 		LOGGER.info( "Connected to debug client" );
+		LOGGER.fine( "[TIMING] Session started at T+0ms" );
 	}
 
 	private void parseFalseExitProperty() {
@@ -127,6 +135,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	@Override
 	public CompletableFuture<Capabilities> initialize( InitializeRequestArguments args ) {
 		LOGGER.info( "Initialize request received from client: " + args.getClientName() );
+		LOGGER.fine( "[TIMING] Initialize request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 		Capabilities capabilities = new Capabilities();
 		capabilities.setSupportsConfigurationDoneRequest( true );
@@ -180,17 +189,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		LOGGER.info( "Sending capabilities to client" );
 
-		CompletableFuture.supplyAsync( () -> {
-			try {
-				Thread.sleep( 3000 );
-				client.initialized();
-			} catch ( InterruptedException e ) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
-
-			return null;
-		} );
+		// Send initialized event immediately - no delay needed
+		// The client will then send setBreakpoints, configurationDone, etc.
+		CompletableFuture.runAsync( () -> client.initialized() );
 
 		return CompletableFuture.completedFuture( capabilities );
 	}
@@ -251,10 +252,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<Void> launch( Map<String, Object> args ) {
-		return CompletableFuture.supplyAsync( () -> {
+		// Create a future to track when launch is complete
+		// configurationDone will wait for this to ensure VM is ready
+		CompletableFuture<Void> future = CompletableFuture.supplyAsync( () -> {
 			try {
 				String program = ( String ) args.get( "program" );
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
+				LOGGER.fine( "[TIMING] Launch request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
 				configureDebugSettings( args );
 
@@ -265,6 +269,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// This sets up ClassPrepareRequest before the VM is resumed
 				if ( vmController == null ) {
 					vmController = new VMController( vm, client );
+					vmController.setSessionStartTime( sessionStartTime );
 				} else {
 					// Transfer pending breakpoints to a new manager with the VM
 					VMController old = vmController;
@@ -275,9 +280,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
 				vmController.startEventProcessing();
 
-				// Now load the debug agent, which resumes the VM
-				// This must happen AFTER VMController is created and event processing started
-				IVMConnection.loadDebugAgent( vmConnection );
+				// Note: The DebuggerUtil will be started automatically when its class is loaded
+				// via the ClassPrepareEvent handler in VMController. We no longer need to call
+				// startDebuggerUtil here because the class may not be loaded yet at this point.
 
 				// Start output monitoring after VM is resumed
 				startOutputMonitoring();
@@ -289,17 +294,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 				this.variableManager = new VariableManager( vmController );
 
-				// client.initialized();
-
+				LOGGER.info( "Launch completed successfully, VM is ready" );
 				return null;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
 				e.printStackTrace();
 				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
+				throw new RuntimeException( "Launch failed", e );
 			}
-
-			return null;
 		} );
+
+		this.launchFuture = future;
+		return future;
 	}
 
 	/**
@@ -364,11 +370,14 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Monitor an output stream and send events to the client
 	 */
 	private void monitorOutputStream( InputStream inputStream, String category ) {
+		LOGGER.info( "Starting monitor for " + category + " stream" );
 		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
 			String line;
 			while ( ( line = reader.readLine() ) != null ) {
+				LOGGER.info( "Output from " + category + ": " + line );
 				sendOutput( line, category );
 			}
+			LOGGER.info( "Monitor for " + category + " stream ended (stream closed)" );
 		} catch ( IOException e ) {
 			LOGGER.warning( "Error reading from " + category + " stream: " + e.getMessage() );
 		}
@@ -410,6 +419,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				// Create a temporary breakpoint manager for pending breakpoint storage
 				// This will be replaced with a proper one when launch() is called
 				vmController = new VMController( null, client );
+				vmController.setSessionStartTime( sessionStartTime );
 				LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
 			}
 
@@ -1004,11 +1014,25 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		return CompletableFuture.supplyAsync( () -> {
 
 			LOGGER.info( "Configuration done request received" );
+			LOGGER.fine( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+
+			// Wait for launch to complete before processing configurationDone
+			// This ensures the VM is ready before we try to set breakpoints
+			if ( launchFuture != null ) {
+				try {
+					LOGGER.info( "Waiting for launch to complete before processing configurationDone..." );
+					launchFuture.get( 30, java.util.concurrent.TimeUnit.SECONDS );
+					LOGGER.info( "Launch completed, continuing with configurationDone" );
+				} catch ( Exception e ) {
+					LOGGER.severe( "Failed waiting for launch to complete: " + e.getMessage() );
+					// Continue anyway - the VM might be available
+				}
+			}
 
 			// Set actual breakpoints for all pending breakpoints
 			verifyAndSetPendingBreakpoints();
 
-			// Start breakpoint event processing
+			// Start breakpoint event processing (idempotent if already started)
 			vmController.startEventProcessing();
 
 			// Start output monitoring using the VM's process
@@ -1018,36 +1042,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			sessionCleaned = false;
 			startProcessMonitoring();
 
-			// Mark that configuration is complete
-			// In a typical DAP flow, this signals that the client has finished sending
-			// initial configuration requests (like setting breakpoints) and the debugger
-			// can proceed with execution
-
-			// If we have a VM running and breakpoints are set, we can now proceed
-			if ( vm != null && vmController != null ) {
-				LOGGER.info( "Configuration done: VM is running, breakpoints are ready" );
-
-				// Resume execution if the VM is suspended
-				// This is often needed in DAP implementations to continue execution
-				// after initial configuration is complete
-				try {
-					if ( vm.allThreads().stream().anyMatch( thread -> {
-						try {
-							return thread.isSuspended();
-						} catch ( Exception e ) {
-							return false;
-						}
-					} ) ) {
-						LOGGER.info( "Resuming suspended threads after configuration done" );
-						vm.resume();
-					}
-				} catch ( Exception e ) {
-					java.util.logging.Logger.getLogger( BoxDebugServer.class.getName() )
-					    .warning( "Could not resume VM after configuration done: " + e.getMessage() );
-				}
-
-			} else {
-				LOGGER.info( "Configuration done: No active VM yet, configuration will be applied when VM starts" );
+			// Signal to VMController that configuration is complete
+			// This allows the VM to be resumed if it was waiting
+			if ( vmController != null ) {
+				vmController.signalConfigurationDone();
 			}
 
 			LOGGER.info( "Configuration done request completed successfully" );

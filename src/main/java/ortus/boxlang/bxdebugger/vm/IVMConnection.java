@@ -1,60 +1,71 @@
 package ortus.boxlang.bxdebugger.vm;
 
 import java.io.IOException;
-import java.net.URISyntaxException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.List;
 
+import com.sun.jdi.ReferenceType;
+import com.sun.jdi.ThreadReference;
 import com.sun.jdi.VirtualMachine;
 import com.sun.tools.attach.AttachNotSupportedException;
 
+/**
+ * Interface for VM connections used by the debugger.
+ */
 public interface IVMConnection {
 
-	public static void loadDebugAgent( IVMConnection connection ) throws IOException {
+	/**
+	 * The fully qualified class name of the DebuggerUtil in BoxLang runtime
+	 */
+	public static final String DEBUGGER_SERVICE_CLASS = "ortus.boxlang.debug.DebuggerExternalConnectionUtil";
+
+	/**
+	 * Check if the DebuggerUtil is already started in the target VM.
+	 * BoxLang now starts the DebuggerUtil automatically when debugMode=true,
+	 * so this method just detects if it's running by looking for the invoker thread.
+	 *
+	 * @param vm The target virtual machine
+	 *
+	 * @return true if the service is started (invoker thread exists)
+	 */
+	public static boolean isDebuggerUtilStarted( VirtualMachine vm ) {
 		try {
-			VirtualMachine						vm			= connection.getVirtualMachine();
-			com.sun.tools.attach.VirtualMachine	attachVM	= connection.getAttachVirtualMachine();
-			vm.resume();
-			attachVM.loadAgent( getDebugAgentPath() );
-			attachVM.detach();
-			// vm.suspend();
+			List<ReferenceType> classes = vm.classesByName( DEBUGGER_SERVICE_CLASS );
+			if ( classes.isEmpty() ) {
+				return false;
+			}
 
-			java.util.logging.Logger.getLogger( IVMConnection.class.getName() ).info( "Debug agent loaded successfully" );
-
-		} catch ( Throwable e ) {
-			java.util.logging.Logger.getLogger( IVMConnection.class.getName() ).warning( "Failed to start debug exec thread: " + e.getMessage() );
+			// Check if the invoker thread exists - its presence indicates the service is running
+			for ( ThreadReference thread : vm.allThreads() ) {
+				if ( thread.name().equals( "BoxLang-DebuggerInvoker" ) ) {
+					return true;
+				}
+			}
+		} catch ( Exception e ) {
+			// Ignore - service not started
 		}
-
+		return false;
 	}
 
+	/**
+	 * Get the virtual machine for this connection.
+	 *
+	 * @return The JDI VirtualMachine
+	 */
 	public VirtualMachine getVirtualMachine();
 
+	/**
+	 * Get the attach virtual machine for this connection.
+	 * This is used for agent loading (deprecated - no longer needed).
+	 *
+	 * @return The attach VirtualMachine
+	 *
+	 * @throws AttachNotSupportedException if attach is not supported
+	 * @throws IOException                 if an I/O error occurs
+	 *
+	 * @deprecated The agent loading mechanism is no longer used.
+	 *             BoxLang now starts the DebuggerUtil automatically when debugMode=true.
+	 */
+	@Deprecated
 	public com.sun.tools.attach.VirtualMachine getAttachVirtualMachine() throws AttachNotSupportedException, IOException;
-
-	private static String getDebugAgentPath() {
-		if ( System.getProperty( "boxlang.debugger.agentjarpath" ) != null ) {
-			return System.getProperty( "boxlang.debugger.agentjarpath" );
-		}
-		// Get the path to the JAR file containing this class
-		Path jarPath;
-		try {
-			jarPath = Paths.get( IVMConnection.class.getProtectionDomain().getCodeSource().getLocation().toURI() );
-
-			// Get the parent directory of the JAR
-			Path	jarDir			= jarPath.getParent();
-
-			// Create a path relative to the JAR directory
-			// Path relativePath = jarDir.resolve( "bx-debugger-agent.jar" );
-			Path	relativePath	= Paths.get( "C:\\Users\\jacob\\Dev\\ortus-boxlang\\bx-debugger\\build\\libs\\bx-debugger-1.0.0-snapshot-agent.jar" );
-
-			return relativePath.toString();
-		} catch ( URISyntaxException e ) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-
-		System.exit( 1 );
-		return null;
-	}
 
 }

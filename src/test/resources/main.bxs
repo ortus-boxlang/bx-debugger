@@ -3,4 +3,4 @@ function greet( name ){
     return greeting;
 }
 
-println( greet("World") )
+println( "Greeting is #greet("World")#" )

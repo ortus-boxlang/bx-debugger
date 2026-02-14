@@ -8,6 +8,11 @@ bin/**
 ### IntelliJ IDEA ###
 .idea/
 
+### Eclipse ###
+.classpath
+.project
+.settings/
+
 ### Mac OS ###
 .DS_Store
 
