@@ -1,0 +1,8 @@
+class {
+
+	function init() {
+		variables.foo = "bar";
+		variables.baz = "qux";
+		return this;
+	}
+}

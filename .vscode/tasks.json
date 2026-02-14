@@ -25,6 +25,38 @@
 			],
 			"isBackground": false,
 			"group": "test"
+		},
+		{
+			"label": "Start BoxLang Miniserver (Debug)",
+			"type": "shell",
+			"command": "java",
+			"args": [
+				"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=0.0.0.0:5005",
+				"-jar",
+				"${workspaceFolder}/../boxlang-miniserver/build/distributions/boxlang-miniserver-1.10.0-snapshot.jar",
+				"--webroot",
+				"${workspaceFolder}/debug-webroot",
+				"--debug"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"isBackground": true,
+			"problemMatcher": {
+				"pattern": {
+					"regexp": "^$"
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": "^.*$",
+					"endsPattern": "^.*BoxLang MiniServer started.*$"
+				}
+			},
+			"group": "none",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			}
 		}
 	]
 }
