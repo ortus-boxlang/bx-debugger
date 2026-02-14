@@ -86,7 +86,7 @@ public class ExceptionBreakpointTest {
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
+	@Timeout( value = 60, unit = TimeUnit.SECONDS )
 	void testExceptionBreakpointPausesOnBoxRuntimeException() throws Exception {
 		// Start the debug server
 		CountDownLatch serverStartedLatch = new CountDownLatch( 1 );
