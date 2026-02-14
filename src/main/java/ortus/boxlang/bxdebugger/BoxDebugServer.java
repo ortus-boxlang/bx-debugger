@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -814,7 +815,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				if ( frame.getSource() != null && frame.getSource().getPath() != null ) {
 					String	remotePath	= frame.getSource().getPath();
 					String	localPath	= pathMappingService.toLocalPath( remotePath );
-					frame.getSource().setPath( localPath );
+					// Convert to native OS path separators for the client
+					frame.getSource().setPath( Paths.get( localPath ).toString() );
 				}
 			}
 
