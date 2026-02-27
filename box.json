@@ -1,5 +1,5 @@
 {
-	"name": "@MODULE_NAME@",
+	"name": "bx-debugger",
 	"version": "@build.version@+@build.number@",
 	"location": "https://downloads.ortussolutions.com/ortussolutions/boxlang-modules/bx-debugger/@build.version@/bx-debugger-@build.version@.zip",
 	"author": "Ortus Solutions",
@@ -13,7 +13,9 @@
 	"slug": "bx-debugger",
 	"shortDescription": "Module template for BoxLang modules",
 	"type": "boxlang-modules",
-	"keywords": ["boxlang"],
+	"keywords": [
+		"boxlang"
+	],
 	"boxlang": {
 		"minimumVersion": "1.0.0",
 		"moduleName": "@MODULE_REGISTERED_NAME@"
