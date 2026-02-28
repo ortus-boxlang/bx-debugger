@@ -142,7 +142,7 @@ class {
 		}
 
 
-		var lsp = createObjecT( "java", "ortus.boxlang.lsp.App" );
+		var lsp = createObjecT( "java", "ortus.boxlang.bxdebugger.BoxDebugger" );
 		lsp.main( javaCast( "String[]", args ) );
 	 }
 
