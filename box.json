@@ -11,14 +11,14 @@
 	},
 	"bugs": "https://ortussolutions.atlassian.net/browse/BLMODULES",
 	"slug": "bx-debugger",
-	"shortDescription": "Module template for BoxLang modules",
+	"shortDescription": "Debugger module for BoxLang",
 	"type": "boxlang-modules",
 	"keywords": [
 		"boxlang"
 	],
 	"boxlang": {
-		"minimumVersion": "1.0.0",
-		"moduleName": "@MODULE_REGISTERED_NAME@"
+		"minimumVersion": "1.10.0",
+		"moduleName": "bx-debugger"
 	},
 	"private": false,
 	"license": [

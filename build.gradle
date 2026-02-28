@@ -176,6 +176,9 @@ task createModuleStructure(type: Copy) {
 		} else {
 			filter{ line -> line.replaceAll( '@build.number@', project.buildID ) }
 		}
+
+		filter{ line -> line.replaceAll( '@build.builtOn@', project.builtOn ) }
+		filter{ line -> line.replaceAll( '@build.commit@', project.gitCommitHash ) }
     }
     from( '.' ) {
         include 'box.json'
