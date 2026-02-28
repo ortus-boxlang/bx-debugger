@@ -1,3 +1,5 @@
+import java.text.SimpleDateFormat
+
 // https://docs.gradle.org/current/userguide/building_java_projects.html#sec:java_packaging
 plugins {
     id 'java'
@@ -19,6 +21,15 @@ targetCompatibility = jdkVersion
 ext {
 	buildID = System.getenv( 'BUILD_ID' ) ?: '0'
 	branch = System.getenv( 'BRANCH' ) ?: 'development'
+	builtOn = new SimpleDateFormat( "yyyy-MM-dd HH:mm:ss" ).format( new Date() )
+	gitCommitHash = {
+		def stdout = new ByteArrayOutputStream()
+		exec {
+			commandLine 'git', 'rev-parse', 'HEAD'
+			standardOutput = stdout
+		}
+		return stdout.toString().trim()
+	}.call()
 }
 
 if ( branch == 'development' ) {
