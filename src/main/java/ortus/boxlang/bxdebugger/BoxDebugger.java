@@ -62,6 +62,7 @@ public class BoxDebugger {
 
 		try ( ServerSocketChannel serverSocket = ServerSocketChannel.open() ) {
 			serverSocket.bind( new InetSocketAddress( port ) );
+			System.out.println( String.format( "Listening on port: %s", port ) );
 			LOGGER.info( "Debug server listening on port " + port );
 
 			ExecutorService	executor			= Executors.newCachedThreadPool();
