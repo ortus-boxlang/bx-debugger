@@ -1222,6 +1222,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					// We perform cleanup and rely on a subsequent initialize/launch from client.
 					sendTerminatedEvent();
 					performSessionCleanup();
+					if ( !falseExit ) {
+						System.exit( 0 );
+					}
 					return null;
 				}
 
@@ -1252,6 +1255,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					detachFromDebuggee();
 					sendTerminatedEvent();
 					performSessionCleanup();
+					if ( !falseExit ) {
+						System.exit( 0 );
+					}
 				}
 
 				return null;
