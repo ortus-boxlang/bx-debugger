@@ -1,0 +1,14 @@
+services:
+  boxlang:
+    image: ortussolutions/commandbox:ubi9
+    ports:
+      - 9111:8080
+      - 9888:8888
+    healthcheck:
+      disable: true
+    environment:
+      - BOX_SERVER_APP_CFENGINE=boxlang@1.11.0
+      - BOXLANG_DEBUGMODE=true
+      - BOXLANG_DEBUG=true
+    volumes:
+      - ./:/app

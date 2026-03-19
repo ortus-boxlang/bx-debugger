@@ -1,0 +1,13 @@
+<bx:script>
+    function add(a, b) {
+        return a + b;
+    }
+
+    x = add(5, 10);
+</bx:script>
+
+<bx:output>
+    <h1>Docker Test: #now()#</h1>
+    #x#
+    <bx:dump var="#server#"/>
+</bx:output>

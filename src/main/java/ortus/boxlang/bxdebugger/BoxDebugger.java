@@ -39,7 +39,7 @@ public class BoxDebugger {
 		int port = getPortFromArgs( args );
 
 		try {
-			startLSPServer( port );
+			startDAPServer( port );
 		} catch ( IOException e ) {
 			LOGGER.severe( "Failed to start LSP server: " + e.getMessage() );
 			System.exit( 1 );
@@ -54,16 +54,18 @@ public class BoxDebugger {
 				LOGGER.warning( "Invalid port number provided: " + args[ 0 ] + ". Using default port " + DEFAULT_PORT );
 			}
 		}
+
 		return DEFAULT_PORT;
 	}
 
-	private static void startLSPServer( int port ) throws IOException {
+	private static void startDAPServer( int port ) throws IOException {
 		LOGGER.info( "Starting BoxLang Debug Adapter Protocol server on port " + port );
 
 		try ( ServerSocketChannel serverSocket = ServerSocketChannel.open() ) {
-			serverSocket.bind( new InetSocketAddress( port ) );
-			System.out.println( String.format( "Listening on port: %s", port ) );
-			LOGGER.info( "Debug server listening on port " + port );
+			serverSocket.bind( new InetSocketAddress( "127.0.0.1", port ) );
+			int assignedPort = ( ( InetSocketAddress ) serverSocket.getLocalAddress() ).getPort();
+			System.out.println( String.format( "Listening on port: %s", assignedPort ) );
+			LOGGER.info( "Debug server listening on port " + assignedPort );
 
 			ExecutorService	executor			= Executors.newCachedThreadPool();
 			int				consecutiveErrors	= 0;
@@ -81,11 +83,14 @@ public class BoxDebugger {
 
 				} catch ( IOException e ) {
 					consecutiveErrors++;
-					LOGGER.severe( "Error accepting client connection (attempt " + consecutiveErrors + "): " + e.getMessage() );
+					LOGGER.severe(
+					    "Error accepting client connection (attempt " + consecutiveErrors + "): " + e.getMessage() );
 
-					// If we have too many consecutive errors, implement backoff to prevent hard loop
+					// If we have too many consecutive errors, implement backoff to prevent hard
+					// loop
 					if ( consecutiveErrors >= MAX_CONSECUTIVE_ERRORS ) {
-						LOGGER.warning( "Too many consecutive errors (" + consecutiveErrors + "). Implementing backoff..." );
+						LOGGER.warning(
+						    "Too many consecutive errors (" + consecutiveErrors + "). Implementing backoff..." );
 						try {
 							Thread.sleep( ERROR_BACKOFF_MS );
 						} catch ( InterruptedException ie ) {
@@ -165,15 +170,13 @@ public class BoxDebugger {
 				    debugServer,
 				    // clientSocket.socket().getInputStream(),
 				    teeInputStream,
-				    clientSocket.socket().getOutputStream()
-				);
+				    clientSocket.socket().getOutputStream() );
 			} else {
 				LOGGER.info( "Creating DSP launcher..." );
 				launcher = DSPLauncher.createServerLauncher(
 				    debugServer,
 				    clientSocket.socket().getInputStream(),
-				    clientSocket.socket().getOutputStream()
-				);
+				    clientSocket.socket().getOutputStream() );
 			}
 
 			LOGGER.info( "Connecting debug server to client..." );
