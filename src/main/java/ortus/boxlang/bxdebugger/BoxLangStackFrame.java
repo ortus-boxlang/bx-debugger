@@ -53,7 +53,9 @@ public class BoxLangStackFrame extends StackFrame {
 			setSource( javaFrame.getSource() );
 			// the name and path values are flipped for some reason
 			// so we set the path to the name
-			getSource().setPath( javaFrame.getSource().getName() );
+			if ( javaFrame.getSource() != null ) {
+				getSource().setPath( javaFrame.getSource().getName() );
+			}
 			setEndLine( javaFrame.getEndLine() );
 			setEndColumn( javaFrame.getEndColumn() );
 			setModuleId( javaFrame.getModuleId() );

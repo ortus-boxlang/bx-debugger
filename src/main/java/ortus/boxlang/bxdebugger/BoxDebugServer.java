@@ -212,8 +212,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					return;
 				}
 				String	serverName	= ( String ) args.getOrDefault( "serverName", "" );
-				int		port		= ( int ) ( ( Double ) args.getOrDefault( "serverPort", "0" ) ).doubleValue();
-				// int port = ( int ) Double.parseDouble( strPort );
+				Object	portVal		= args.getOrDefault( "serverPort", 0 );
+				int		port		= portVal instanceof Number
+				    ? ( ( Number ) portVal ).intValue()
+				    : ( int ) Double.parseDouble( portVal.toString() );
 
 				if ( serverName.isEmpty() && port == 0 ) {
 					LOGGER.warning( "Attach requested but neither serverName nor serverPort is provided" );

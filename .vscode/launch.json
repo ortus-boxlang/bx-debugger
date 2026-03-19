@@ -54,6 +54,16 @@
             "program": "${workspaceFolder}/debug-webroot/index.bxm",
             "localRoot": "${workspaceFolder}/debug-webroot",
             "remoteRoot": "${workspaceFolder}/debug-webroot"
+        },
+        {
+            // use this with src\test\docker\docker-compose.yml
+            "name": "Debug Dockerized BoxLang CommandBox Server",
+            "type": "boxlang",
+            "request": "attach",
+            "debugServer": 9898,
+            "serverPort": 9888,
+            "localRoot": "${workspaceFolder}/src/test/docker",
+            "remoteRoot": "/app"
         }
     ],
     "compounds": [
