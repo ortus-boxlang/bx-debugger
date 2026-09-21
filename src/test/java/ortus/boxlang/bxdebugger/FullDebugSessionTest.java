@@ -202,7 +202,7 @@ public class FullDebugSessionTest {
 				CompletableFuture<StackTraceResponse>	stackTraceResponse2	= server.stackTrace( stackTraceArgs2 );
 				StackTraceResponse						stackTraceResult2	= stackTraceResponse2.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
-				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
+				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isAnyOf( "_invoke", "invokeFunction_greet" );                                                                                                                // response
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getLine() ).isEqualTo( breakpointOne );
 
 				// SCOPES

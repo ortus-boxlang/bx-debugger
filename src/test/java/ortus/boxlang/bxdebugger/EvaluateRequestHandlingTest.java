@@ -22,6 +22,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
+import org.eclipse.lsp4j.debug.ScopesArguments;
 import org.eclipse.lsp4j.debug.ContinueArguments;
 import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
@@ -193,6 +194,30 @@ class EvaluateRequestHandlingTest {
 		server.continue_( args ).get( 5, TimeUnit.SECONDS );
 		ExecutionException error = assertThrows( ExecutionException.class, () -> evaluate( frames[ 0 ].getId(), "marker" ) );
 		assertEvaluationFailure( error, "frame" );
+	}
+
+	@Test
+	void continueInvalidatesFramesAndVariableChildren() throws Exception {
+		int ref = evaluate( frames[ 0 ].getId(), "payload" ).getVariablesReference();
+		Variable[] children = variables( ref );
+		int childRef = Arrays.stream( children ).filter( v -> v.getVariablesReference() > 0 )
+		    .findFirst().orElseThrow().getVariablesReference();
+		ScopesArguments scopes = new ScopesArguments();
+		scopes.setFrameId( frames[ 0 ].getId() );
+		int scopeRef = server.scopes( scopes ).get( 10, TimeUnit.SECONDS ).getScopes()[ 0 ].getVariablesReference();
+		ContinueArguments resume = new ContinueArguments();
+		resume.setThreadId( threadId );
+		resume.setSingleThread( true );
+		server.continue_( resume ).get( 5, TimeUnit.SECONDS );
+		for ( int expired : new int[] { ref, childRef, scopeRef } ) {
+			ExecutionException error = assertThrows( ExecutionException.class, () -> variables( expired ) );
+			assertInstanceOf( ResponseErrorException.class, error.getCause() );
+			assertTrue( error.getCause().getMessage().contains( "reference" ) );
+		}
+		assertThrows( ExecutionException.class, () -> server.scopes( scopes ).get( 5, TimeUnit.SECONDS ) );
+		StackTraceArguments stack = new StackTraceArguments();
+		stack.setThreadId( threadId );
+		assertEquals( 0, server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames().length );
 	}
 
 	@ParameterizedTest

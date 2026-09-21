@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -20,24 +21,30 @@ import com.sun.jdi.ObjectReference;
 import com.sun.jdi.StackFrame;
 import com.sun.jdi.ThreadReference;
 import com.sun.jdi.Value;
+import com.sun.jdi.event.EventSet;
 
 public class BreakpointContext {
 
 	private static final Logger	LOGGER			= Logger.getLogger( BreakpointContext.class.getName() );
 
-	private static int			stackFrameId	= 0;
+	private static final AtomicInteger stackFrameId = new AtomicInteger();
 
 	private int					breakpointId;
 	private ThreadReference		stoppedThread;
 	private VMController		vmController;
 	private ObjectReference		context;
-	private List<FrameTuple>	stackFrames;
+	private volatile List<FrameTuple> stackFrames;
+	private final VariableManager variables;
+	private volatile boolean active = true;
+	private final EventSet eventSet;
 
-	public BreakpointContext( int breakpointId, ThreadReference stoppedThread, VMController vmController ) {
+	public BreakpointContext( int breakpointId, ThreadReference stoppedThread, VMController vmController, EventSet eventSet ) {
 		this.breakpointId	= breakpointId;
 		this.stoppedThread	= stoppedThread;
 		this.vmController	= vmController;
 		this.stackFrames	= new ArrayList<>();
+		this.variables = new VariableManager( vmController );
+		this.eventSet = eventSet;
 
 		this.transformStackFrames();
 	}
@@ -46,7 +53,7 @@ public class BreakpointContext {
 	}
 
 	public static int getNextStackFrameId() {
-		return stackFrameId++;
+		return stackFrameId.incrementAndGet();
 	}
 
 	public boolean hasStackFrameId( int stackframeId ) {
@@ -63,17 +70,41 @@ public class BreakpointContext {
 	}
 
 	public ObjectReference getContext() {
+		checkActive();
 		if ( context == null ) {
 			context = findContextForFrame( stackFrames.get( 0 ).jdiFrame() );
 		}
 		return context;
 	}
 
+	public VariableManager getVariables() {
+		checkActive();
+		return variables;
+	}
+
+	public void checkActive() {
+		if ( !active ) {
+			throw new IllegalArgumentException( "Expired stack frame: thread has resumed" );
+		}
+	}
+
+	public void invalidate() {
+		active = false;
+		variables.clear();
+		stackFrames = List.of();
+		context = null;
+	}
+
+	EventSet getEventSet() {
+		return eventSet;
+	}
+
 	public void resume() {
-		stoppedThread.resume();
+		vmController.continueExecution( this );
 	}
 
 	public List<org.eclipse.lsp4j.debug.StackFrame> getStackFrames() {
+		checkActive();
 		return stackFrames.stream()
 		    .map( FrameTuple::dapFrame )
 		    .collect( Collectors.toList() );
@@ -137,6 +168,7 @@ public class BreakpointContext {
 	}
 
 	public Optional<ObjectReference> getContext( int frameId ) {
+		checkActive();
 		if ( !stoppedThread.isSuspended() ) {
 			throw new IllegalArgumentException( "Expired stack frame " + frameId + ": thread has resumed" );
 		}

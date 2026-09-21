@@ -3,32 +3,37 @@ package ortus.boxlang.bxdebugger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.ArrayDeque;
+import java.util.Queue;
 
 import org.eclipse.lsp4j.debug.StoppedEventArguments;
 
 public class TestDebugClient implements IBoxLangDebugClient {
 
-	private CompletableFuture<StoppedEventArguments>		stoppedEventFuture		= null;
-	private final AtomicReference<StoppedEventArguments>	lastStoppedEvent		= new AtomicReference<>();
-	private CompletableFuture<Void>							initializedEventFuture	= null;
-	private final List<BoxLangDumpEventBody>				dumpEvents				= new ArrayList<>();
-	private CompletableFuture<BoxLangDumpEventBody>			dumpEventFuture			= null;
+	private CompletableFuture<StoppedEventArguments>	stoppedEventFuture		= null;
+	private final Queue<StoppedEventArguments>			stoppedEvents			= new ArrayDeque<>();
+	private CompletableFuture<Void>						initializedEventFuture	= null;
+	private final List<BoxLangDumpEventBody>			dumpEvents				= new ArrayList<>();
+	private CompletableFuture<BoxLangDumpEventBody>		dumpEventFuture			= null;
 
 	@Override
-	public void stopped( StoppedEventArguments args ) {
-		lastStoppedEvent.set( args );
+	public synchronized void stopped( StoppedEventArguments args ) {
 		if ( stoppedEventFuture != null && !stoppedEventFuture.isDone() ) {
-			stoppedEventFuture.complete( args );
+			var waiter = stoppedEventFuture;
+			stoppedEventFuture = null;
+			waiter.complete( args );
+		} else {
+			stoppedEvents.add( args );
 		}
 	}
 
-	public CompletableFuture<StoppedEventArguments> waitForStoppedEvent() {
-		stoppedEventFuture = new CompletableFuture<>();
-		// Complete immediately if the event already arrived before we started waiting
-		StoppedEventArguments already = lastStoppedEvent.getAndSet( null );
+	public synchronized CompletableFuture<StoppedEventArguments> waitForStoppedEvent() {
+		StoppedEventArguments already = stoppedEvents.poll();
 		if ( already != null ) {
-			stoppedEventFuture.complete( already );
+			return CompletableFuture.completedFuture( already );
+		}
+		if ( stoppedEventFuture == null || stoppedEventFuture.isDone() ) {
+			stoppedEventFuture = new CompletableFuture<>();
 		}
 		return stoppedEventFuture;
 	}

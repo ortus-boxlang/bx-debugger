@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improve variable dumps in REPL
 - Bump BoxLang version to 1.17.0
 - BLIDE-328 Fix CFC stack frames
+- BLIDE-329 stabilize stop/resume behavior
 
 ## [1.1.1] - 2026-03-19
 

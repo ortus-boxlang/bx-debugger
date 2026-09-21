@@ -1,6 +1,7 @@
 package ortus.boxlang.bxdebugger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,7 +12,8 @@ import java.util.concurrent.TimeUnit;
 
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.ScopesArguments;
-import org.eclipse.lsp4j.debug.ScopesResponse;
+import java.util.concurrent.ExecutionException;
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException;
 import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
@@ -102,14 +104,13 @@ public class ScopesRequestHandlingTest {
 			ScopesArguments scopesArgs = new ScopesArguments();
 			scopesArgs.setFrameId( -1 ); // Invalid frame ID
 
-			// Request scopes
-			ScopesResponse scopesResponse = server.scopes( scopesArgs ).get( 5, TimeUnit.SECONDS );
-
-			// Verify scopes response handles invalid frame gracefully
-			assertNotNull( scopesResponse, "Scopes response should not be null even with invalid frame" );
-			assertNotNull( scopesResponse.getScopes(), "Scopes array should not be null" );
-			// Should return empty array for invalid frame
-			assertEquals( 0, scopesResponse.getScopes().length, "Should return empty scopes for invalid frame" );
+			ExecutionException error = assertThrows( ExecutionException.class,
+			    () -> server.scopes( scopesArgs ).get( 5, TimeUnit.SECONDS ) );
+			ResponseErrorException response = assertInstanceOf( ResponseErrorException.class, error.getCause() );
+			assertTrue( response.getMessage().contains( "Unable to read scopes" ) );
+			assertTrue( response.getMessage().contains( "stack frame" ) );
+			// An invalid reference must fail only the request, not disconnect the client.
+			assertNotNull( server.threads().get( 5, TimeUnit.SECONDS ) );
 		}
 	}
 

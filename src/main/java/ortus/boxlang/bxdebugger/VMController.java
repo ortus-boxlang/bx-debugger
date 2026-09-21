@@ -7,7 +7,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -18,6 +18,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
+import org.eclipse.lsp4j.debug.ContinuedEventArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
@@ -85,14 +86,15 @@ public class VMController {
 	// DAP-level breakpoint storage - organized by file path
 	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile		= new ConcurrentHashMap<>();
 	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById			= new ConcurrentHashMap<>();
-	private int																breakpointIdCounter				= 1;
+	private final AtomicInteger breakpointIdCounter = new AtomicInteger();
 
-	private final Map<Integer, BreakpointContext>							breakPointContexts				= new WeakHashMap<>();
+	private final Map<Long, BreakpointContext> breakPointContexts = new ConcurrentHashMap<>();
+	// Serializes stop publication/resume only; never hold this across expression evaluation.
+	private final Object stopLock = new Object();
 
 	private MethodEntryRequest												methodEntryRequest				= null;
 	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue			= new ConcurrentLinkedQueue<>();
 	private Map<Long, StepRequest>											stepRequests					= new ConcurrentHashMap<>();
-	private Map<Long, EventSet>												eventSets						= new ConcurrentHashMap<>();
 
 	private MethodEntryRequest												methodEntryRequestDebugger		= null;
 	private CompletableFuture<Void>											debugFuture						= null;
@@ -132,7 +134,6 @@ public class VMController {
 	// Flag to track whether configurationDone has been called
 	// VM should not resume until this is true
 	private volatile boolean												configurationDone				= false;
-	private volatile boolean												vmStartEventReceived			= false;
 	// Store the VMStartEvent's eventSet so we can resume it when configurationDone is called
 	private volatile EventSet												vmStartEventSet					= null;
 	// Session start time for timing instrumentation
@@ -502,94 +503,47 @@ public class VMController {
 			    "executeSource",
 			    List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
 			    List.of( vm.mirrorOf( expression ), context )
-			) );
+			) ).thenApply( value -> {
+				bpContext.checkActive();
+				return value;
+			} );
 		} );
 	}
 
 	public void stepThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
-		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_OVER );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
+		stepThread( ( int ) threadId, StepRequest.STEP_OVER, true );
 	}
 
 	public void stepInThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
-		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_INTO );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
+		stepThread( ( int ) threadId, StepRequest.STEP_INTO, true );
 	}
 
 	public void stepOutThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
+		stepThread( ( int ) threadId, StepRequest.STEP_OUT, true );
+	}
+
+	public void stepThread( int threadId, int depth, boolean singleThread ) {
+		synchronized ( stopLock ) {
+			BreakpointContext context = getBreakpointContextByThread( threadId )
+			    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) );
+			StepRequest old = stepRequests.remove( ( long ) threadId );
+			if ( old != null ) vm.eventRequestManager().deleteEventRequest( old );
+			StepRequest request = vm.eventRequestManager().createStepRequest( context.getThreadReference(), StepRequest.STEP_LINE, depth );
+			request.addClassFilter( "boxgenerated.*" );
+			request.addCountFilter( 1 );
+			request.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+			request.enable();
+			stepRequests.put( ( long ) threadId, request );
+			resumeStops( singleThread ? List.of( context ) : new ArrayList<>( breakPointContexts.values() ), true );
 		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_OUT );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
 	}
 
 	public Optional<BreakpointContext> getBreakpointContext( int breakpointId ) {
-		return Optional.ofNullable( breakPointContexts.get( breakpointId ) );
+		return breakPointContexts.values().stream().filter( ctx -> ctx.getBreakpointId() == breakpointId ).findFirst();
 	}
 
 	public Optional<BreakpointContext> getBreakpointContextByThread( int threadId ) {
-		return breakPointContexts.values()
-		    .stream()
-		    .filter( ctx -> ctx.getThreadReference().uniqueID() == threadId )
-		    .findFirst();
+		return Optional.ofNullable( breakPointContexts.get( ( long ) threadId ) );
 	}
 
 	public Optional<BreakpointContext> getBreakpointContextbyStackFrame( int stackframeId ) {
@@ -1368,6 +1322,20 @@ public class VMController {
 	 */
 	public void stopEventProcessing() {
 		eventProcessingActive = false;
+		synchronized ( stopLock ) {
+			breakPointContexts.values().forEach( BreakpointContext::invalidate );
+			breakPointContexts.clear();
+			vmStartEventSet = null;
+			exceptionInfoByThread.clear();
+			for ( StepRequest request : stepRequests.values() ) {
+				try {
+					vm.eventRequestManager().deleteEventRequest( request );
+				} catch ( Exception e ) {
+					LOGGER.fine( "Unable to delete step request during cleanup: " + e.getMessage() );
+				}
+			}
+			stepRequests.clear();
+		}
 		if ( eventProcessingThread != null ) {
 			eventProcessingThread.interrupt();
 		}
@@ -1379,25 +1347,17 @@ public class VMController {
 	 * This allows the VM to be resumed if it was waiting for configuration.
 	 */
 	public void signalConfigurationDone() {
-		LOGGER.info( "Configuration done signaled" );
-		configurationDone = true;
+		synchronized ( stopLock ) {
+			configurationDone = true;
+			resumeStartEventIfConfigured();
+		}
+	}
 
-		// If VMStartEvent was already received and we were waiting for configuration,
-		// now we can resume the VM
-		if ( vmStartEventReceived && vm != null ) {
-			LOGGER.info( "Resuming VM after configurationDone" );
-			LOGGER.fine( "[TIMING] VM resumed at T+" + getElapsedTime() + "ms" );
-			try {
-				// First resume via the EventSet if we have one stored
-				if ( vmStartEventSet != null ) {
-					vmStartEventSet.resume();
-					vmStartEventSet = null;
-				}
-				// Also call vm.resume() to ensure the VM is fully resumed
-				vm.resume();
-			} catch ( Exception e ) {
-				LOGGER.severe( "Failed to resume VM after configurationDone: " + e.getMessage() );
-			}
+	private void resumeStartEventIfConfigured() {
+		if ( configurationDone && vmStartEventSet != null ) {
+			EventSet start = vmStartEventSet;
+			vmStartEventSet = null;
+			start.resume();
 		}
 	}
 
@@ -1419,7 +1379,7 @@ public class VMController {
 					try {
 						if ( vm != null && vm.process() != null && !vm.process().isAlive() ) {
 							LOGGER.warning( "VM process has terminated! Exit value: " + vm.process().exitValue() );
-							eventProcessingActive = false;
+							stopEventProcessing();
 							return;
 						}
 					} catch ( Exception pe ) {
@@ -1429,39 +1389,32 @@ public class VMController {
 				}
 
 				EventIterator eventIterator = eventSet.eventIterator();
+				boolean stopHandled = false;
 
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
 
 					if ( event instanceof BreakpointEvent be ) {
-						handleBreakpointEvent( be );
+						if ( !stopHandled ) handleBreakpointEvent( be, eventSet );
+						stopHandled = true;
 					} else if ( event instanceof StepEvent se ) {
-						handleStepEvent( se );
+						if ( !stopHandled ) handleStepEvent( se, eventSet );
+						stopHandled = true;
 					} else if ( event instanceof ClassPrepareEvent cpe ) {
 						handleClassPrepareEvent( cpe );
 					} else if ( event instanceof MethodEntryEvent mee ) {
 						handleMethodEntryEvent( mee );
 					} else if ( event instanceof ExceptionEvent ee ) {
-						handleExceptionEvent( ee );
+						if ( !stopHandled ) handleExceptionEvent( ee, eventSet );
+						stopHandled = true;
 					} else if ( event instanceof VMStartEvent ) {
-						vmStartEventReceived	= true;
-						vmStartEventSet			= eventSet;  // Store the eventSet for later resume
-						// Only resume VM if configurationDone has been received
-						// This follows the proper DAP flow where the client sets breakpoints first
-						if ( configurationDone ) {
-							LOGGER.info( "VM started and configuration already done, resuming VM" );
-							try {
-								vmStartEventSet.resume();  // Resume the eventSet, not just the VM
-								vmStartEventSet = null;
-							} catch ( Exception e ) {
-								LOGGER.severe( "Failed to resume VM after VMStartEvent: " + e.getMessage() );
-							}
-						} else {
-							LOGGER.info( "VM started, waiting for configurationDone before resuming" );
+						synchronized ( stopLock ) {
+							vmStartEventSet = eventSet;
+							resumeStartEventIfConfigured();
 						}
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
-						eventProcessingActive = false;
+						stopEventProcessing();
 						return;
 					}
 				}
@@ -1474,22 +1427,19 @@ public class VMController {
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
 					if ( evt instanceof BreakpointEvent be ) {
-						eventSets.put( be.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof MethodEntryEvent mee ) {
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof StepEvent se ) {
-						eventSets.put( se.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof ExceptionEvent ee ) {
-						eventSets.put( ee.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on exception - wait for continue request
 						break;
 					} else if ( evt instanceof VMStartEvent ) {
-						// VMStartEvent is handled by calling vm.resume() above, no need for eventSet.resume()
+						// The startup event has its own configuration gate.
 						isVMStartEvent = true;
 					}
 				}
@@ -1647,7 +1597,7 @@ public class VMController {
 	/**
 	 * Handle a breakpoint event
 	 */
-	private void handleBreakpointEvent( BreakpointEvent event ) {
+	private void handleBreakpointEvent( BreakpointEvent event, EventSet eventSet ) {
 		try {
 			// Ensure helper threads are available for condition evaluation
 			// The worker thread processes tasks, the invoker thread is used for JDI invocations
@@ -1670,13 +1620,14 @@ public class VMController {
 
 			// Track context for expression evaluation (needed before condition check)
 			int contextId = generateBreakpointId();
-			trackBreakpointContext( contextId, event.thread() );
+			BreakpointContext context = trackBreakpointContext( contextId, event.thread(), eventSet );
+			if ( context == null ) return;
 
 			// Check hit condition if specified
 			if ( hitCondition != null && !hitCondition.isEmpty() ) {
 				if ( !checkHitCondition( hitCondition, hitCount ) ) {
 					LOGGER.info( "Hit condition not met: " + hitCondition + " (hit count: " + hitCount + ")" );
-					event.thread().resume();
+					resumeWithoutNotification( context );
 					return;
 				}
 			}
@@ -1685,7 +1636,7 @@ public class VMController {
 			if ( condition != null && !condition.isEmpty() ) {
 				if ( !evaluateCondition( contextId, condition ) ) {
 					LOGGER.info( "Condition evaluated to false: " + condition );
-					event.thread().resume();
+					resumeWithoutNotification( context );
 					return;
 				}
 			}
@@ -1695,7 +1646,7 @@ public class VMController {
 				String expandedMessage = expandLogMessage( contextId, logMessage, hitCount );
 				sendLogOutput( expandedMessage, sourceName, lineNumber );
 				LOGGER.info( "Logpoint: " + expandedMessage );
-				event.thread().resume();
+				resumeWithoutNotification( context );
 				return;
 			}
 
@@ -1707,7 +1658,7 @@ public class VMController {
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 				stoppedArgs.setHitBreakpointIds( new Integer[] { breakpointId } );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
 				LOGGER.fine( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
 				LOGGER.fine( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
@@ -1974,7 +1925,7 @@ public class VMController {
 		}
 	}
 
-	private void handleStepEvent( StepEvent event ) {
+	private void handleStepEvent( StepEvent event, EventSet eventSet ) {
 		try {
 			Location	location	= event.location();
 			String		sourceName	= getSourceName( location );
@@ -1982,13 +1933,8 @@ public class VMController {
 
 			LOGGER.info( "Step completed at " + sourceName + ":" + lineNumber );
 
-			// Remove the step request as it is no longer needed
-			StepRequest stepRequest = stepRequests.remove( event.thread().uniqueID() );
-			if ( stepRequest != null ) {
-				vm.eventRequestManager().deleteEventRequest( stepRequest );
-			}
-
-			trackBreakpointContext( generateBreakpointId(), event.thread() );
+			BreakpointContext context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
+			if ( context == null ) return;
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -1997,7 +1943,7 @@ public class VMController {
 				stoppedArgs.setDescription( "Paused after step" );
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client after step" );
 			}
 
@@ -2009,7 +1955,7 @@ public class VMController {
 	/**
 	 * Handle an exception event
 	 */
-	private void handleExceptionEvent( ExceptionEvent event ) {
+	private void handleExceptionEvent( ExceptionEvent event, EventSet eventSet ) {
 		try {
 			Location		location		= event.catchLocation() != null ? event.catchLocation() : event.location();
 			String			sourceName		= getSourceName( location );
@@ -2034,10 +1980,13 @@ public class VMController {
 			    exceptionType,
 			    exceptionMessage
 			);
-			exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
-
-			// Track the breakpoint context
-			trackBreakpointContext( generateBreakpointId(), event.thread() );
+			// Track the breakpoint context and exception together before publishing the stop.
+			BreakpointContext context;
+			synchronized ( stopLock ) {
+				context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
+				if ( context == null ) return;
+				exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
+			}
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -2047,7 +1996,7 @@ public class VMController {
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 				stoppedArgs.setText( exceptionMessage != null ? exceptionMessage : exceptionType );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client for exception" );
 			}
 
@@ -2093,14 +2042,86 @@ public class VMController {
 		return null;
 	}
 
-	private void trackBreakpointContext( int breakpointId, ThreadReference thread ) {
-		for ( var entry : breakPointContexts.entrySet() ) {
-			if ( entry.getValue().getThreadReference().equals( thread ) ) {
-				breakPointContexts.remove( entry.getKey() );
+	private BreakpointContext trackBreakpointContext( int breakpointId, ThreadReference thread, EventSet eventSet ) {
+		synchronized ( stopLock ) {
+			if ( !eventProcessingActive ) {
+				eventSet.resume();
+				return null;
+			}
+			StepRequest step = stepRequests.remove( thread.uniqueID() );
+			if ( step != null ) vm.eventRequestManager().deleteEventRequest( step );
+			BreakpointContext context = new BreakpointContext( breakpointId, thread, this, eventSet );
+			BreakpointContext old = breakPointContexts.put( thread.uniqueID(), context );
+			if ( old != null ) old.invalidate();
+			exceptionInfoByThread.remove( thread.uniqueID() );
+			return context;
+		}
+	}
+
+	private void publishStop( BreakpointContext context, StoppedEventArguments event ) {
+		synchronized ( stopLock ) {
+			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
+				event.setAllThreadsStopped( false );
+				client.stopped( event );
 			}
 		}
+	}
 
-		breakPointContexts.put( breakpointId, new BreakpointContext( breakpointId, thread, this ) );
+	private void resumeWithoutNotification( BreakpointContext context ) {
+		synchronized ( stopLock ) {
+			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
+				resumeStops( List.of( context ), false );
+			}
+		}
+	}
+
+	public VariableManager getVariables( int reference ) {
+		synchronized ( stopLock ) {
+			return breakPointContexts.values().stream().map( BreakpointContext::getVariables )
+			    .filter( variables -> variables.contains( reference ) ).findFirst()
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired variables reference " + reference ) );
+		}
+	}
+
+	public void continueExecution( BreakpointContext context ) {
+		synchronized ( stopLock ) {
+			resumeStops( List.of( context ), true );
+		}
+	}
+
+	// Called under stopLock: validate the captured stops before touching the VM.
+	private boolean resumeStops( List<BreakpointContext> contexts, boolean notifyClient ) {
+		for ( BreakpointContext context : contexts ) {
+			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) != context ) {
+				throw new IllegalArgumentException( "Stop has already resumed for thread " + context.getThreadReference().uniqueID() );
+			}
+		}
+		for ( BreakpointContext context : contexts ) {
+			long threadId = context.getThreadReference().uniqueID();
+			breakPointContexts.remove( threadId );
+			context.invalidate();
+			exceptionInfoByThread.remove( threadId );
+		}
+		boolean allContinued = breakPointContexts.isEmpty();
+		try {
+			if ( notifyClient && client != null && !contexts.isEmpty() ) {
+				ContinuedEventArguments event = new ContinuedEventArguments();
+				event.setThreadId( ( int ) contexts.getFirst().getThreadReference().uniqueID() );
+				event.setAllThreadsContinued( allContinued );
+				client.continued( event );
+			}
+		} finally {
+			for ( BreakpointContext context : contexts ) context.getEventSet().resume();
+		}
+		return allContinued;
+	}
+
+	public boolean continueExecution( int threadId, boolean singleThread ) {
+		synchronized ( stopLock ) {
+			BreakpointContext context = getBreakpointContextByThread( threadId )
+			    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) );
+			return resumeStops( singleThread ? List.of( context ) : new ArrayList<>( breakPointContexts.values() ), true );
+		}
 	}
 
 	/**
@@ -2283,7 +2304,7 @@ public class VMController {
 	 * Generate a unique breakpoint ID
 	 */
 	public int generateBreakpointId() {
-		return breakpointIdCounter++;
+		return breakpointIdCounter.incrementAndGet();
 	}
 
 	/**
@@ -2607,61 +2628,16 @@ public class VMController {
 	 * Resume execution for the specified thread (called when continue is requested)
 	 */
 	public void continueExecution( int threadId ) {
-		if ( vm == null ) {
-			LOGGER.warning( "Virtual machine not available for continue" );
-			return;
-		}
-
-		try {
-			if ( eventSets.containsKey( ( long ) threadId ) ) {
-				EventSet eventSet = eventSets.remove( ( long ) threadId );
-				eventSet.resume();
-				LOGGER.info( "Resumed thread " + threadId + " via stored event set" );
-				return;
-			}
-			// Find the thread by ID
-			ThreadReference targetThread = null;
-			for ( ThreadReference thread : vm.allThreads() ) {
-				if ( thread.uniqueID() == threadId ) {
-					targetThread = thread;
-					break;
-				}
-			}
-
-			if ( targetThread == null ) {
-				LOGGER.warning( "Thread not found with ID: " + threadId );
-				return;
-			}
-
-			// Resume the thread if it's suspended
-			if ( targetThread.isSuspended() ) {
-				targetThread.resume();
-				LOGGER.info( "Resumed thread " + threadId );
-			} else {
-				LOGGER.info( "Thread " + threadId + " is not suspended, no action needed" );
-			}
-
-		} catch ( Exception e ) {
-			LOGGER.severe( "Error resuming thread " + threadId + ": " + e.getMessage() );
-			e.printStackTrace();
-		}
+		continueExecution( getBreakpointContextByThread( threadId )
+		    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) ) );
 	}
 
 	/**
 	 * Resume execution for all threads (called when continue is requested without specific thread)
 	 */
 	public void continueAllExecution() {
-		if ( vm == null ) {
-			LOGGER.warning( "Virtual machine not available for continue" );
-			return;
-		}
-
-		try {
-			vm.resume();
-			LOGGER.info( "Resumed all threads" );
-		} catch ( Exception e ) {
-			LOGGER.severe( "Error resuming all threads: " + e.getMessage() );
-			e.printStackTrace();
+		synchronized ( stopLock ) {
+			resumeStops( new ArrayList<>( breakPointContexts.values() ), true );
 		}
 	}
 

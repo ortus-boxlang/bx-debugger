@@ -4,7 +4,8 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.logging.Logger;
@@ -27,11 +28,12 @@ import ortus.boxlang.runtime.dynamic.casters.StringCaster;
 
 public class VariableManager {
 
-	private static final Logger		LOGGER			= Logger.getLogger( VariableManager.class.getName() );
-	private int						variableId		= 0;
-	private VMController			vmController;
-	private Map<Integer, Value>		variables		= new WeakHashMap<>();
-	private Map<Integer, String>	evaluateNames	= new WeakHashMap<>();
+	private static final Logger				LOGGER			= Logger.getLogger( VariableManager.class.getName() );
+	private static final AtomicInteger variableIds = new AtomicInteger();
+	private VMController					vmController;
+	private Map<Integer, Value> variables = new ConcurrentHashMap<>();
+	private Map<Integer, String> evaluateNames = new ConcurrentHashMap<>();
+	private volatile boolean expired;
 
 	public VariableManager( VMController vmController ) {
 		this.vmController = vmController;
@@ -41,8 +43,9 @@ public class VariableManager {
 		return put( value, null );
 	}
 
-	public int put( Value value, String evaluateName ) {
-		variableId++;
+	public synchronized int put( Value value, String evaluateName ) {
+		checkActive();
+		int variableId = variableIds.incrementAndGet();
 		variables.put( variableId, value );
 		if ( evaluateName != null ) {
 			evaluateNames.put( variableId, evaluateName );
@@ -54,22 +57,38 @@ public class VariableManager {
 		return variables.get( id );
 	}
 
-	public List<Variable> getVariablesFor( int id ) {
-		var		variable			= variables.get( id );
-		String	parentEvaluateName	= evaluateNames.getOrDefault( id, "" );
-
-		if ( isStruct( variable ) ) {
-			return gerVariablesFromStruct( ( ObjectReference ) variable, parentEvaluateName );
-		} else if ( isArray( variable ) ) {
-			return gerVariablesFromArray( ( ObjectReference ) variable, parentEvaluateName );
-		} else if ( isPOJO( variable ) ) {
-			return gerVariablesFromPojo( ( ObjectReference ) variable, parentEvaluateName );
-		}
-
-		return List.of();
+	public boolean contains( int id ) {
+		return !expired && variables.containsKey( id );
 	}
 
-	public void clear() {
+	public void checkActive() {
+		if ( expired ) {
+			throw new IllegalArgumentException( "Expired variables reference: thread has resumed" );
+		}
+	}
+
+	public List<Variable> getVariablesFor( int id ) {
+		checkActive();
+		var variable = variables.get( id );
+		if ( variable == null ) {
+			throw new IllegalArgumentException( "Unknown or expired variables reference " + id );
+		}
+		String parentEvaluateName = evaluateNames.getOrDefault( id, "" );
+
+		List<Variable> result = List.of();
+		if ( isStruct( variable ) ) {
+			result = gerVariablesFromStruct( ( ObjectReference ) variable, parentEvaluateName );
+		} else if ( isArray( variable ) ) {
+			result = gerVariablesFromArray( ( ObjectReference ) variable, parentEvaluateName );
+		} else if ( isPOJO( variable ) ) {
+			result = gerVariablesFromPojo( ( ObjectReference ) variable, parentEvaluateName );
+		}
+		checkActive();
+		return result;
+	}
+
+	public synchronized void clear() {
+		expired = true;
 		variables.clear();
 		evaluateNames.clear();
 	}
@@ -227,6 +246,7 @@ public class VariableManager {
 	}
 
 	public Variable convertValueToVariable( String name, Value val, String evaluateName ) {
+		checkActive();
 		Variable var = new Variable();
 		var.setType( "null" );
 		var.setValue( "" );
@@ -292,6 +312,7 @@ public class VariableManager {
 			var.setVariablesReference( put( val, evaluateName ) );
 		}
 
+		checkActive();
 		return var;
 	}
 

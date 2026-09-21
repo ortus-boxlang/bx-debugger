@@ -8,7 +8,6 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -18,7 +17,6 @@ import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
 import org.eclipse.lsp4j.debug.Capabilities;
@@ -58,7 +56,7 @@ import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
 import com.sun.jdi.InvalidStackFrameException;
-import com.sun.jdi.Value;
+import com.sun.jdi.request.StepRequest;
 import com.sun.jdi.VirtualMachine;
 
 import ortus.boxlang.bxdebugger.vm.IVMConnection;
@@ -75,7 +73,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private IBoxLangDebugClient								client;
 	private ExecutorService									outputMonitorExecutor;
 	private VMController									vmController;
-	private VariableManager									variableManager;
 	private SourceManager									sourceManager			= new SourceManager();
 	private PathMappingService								pathMappingService;
 	// Ensure we only start output monitoring once per session
@@ -163,6 +160,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		Capabilities capabilities = new Capabilities();
 		capabilities.setSupportsConfigurationDoneRequest( true );
+		capabilities.setSupportsSingleThreadExecutionRequests( true );
 		capabilities.setSupportsTerminateRequest( true );
 		capabilities.setSupportsConditionalBreakpoints( true );
 		capabilities.setSupportsEvaluateForHovers( false );
@@ -292,8 +290,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					vmController.setPathMappingService( pathMappingService );
 				}
 
-				this.variableManager = new VariableManager( vmController );
-
 				startOutputMonitoring(); // may be a no-op if remote
 
 				LOGGER.info( "Attach completed successfully, VM is ready" );
@@ -350,8 +346,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				if ( pathMappingService != null ) {
 					vmController.setPathMappingService( pathMappingService );
 				}
-
-				this.variableManager = new VariableManager( vmController );
 
 				LOGGER.info( "Launch completed successfully, VM is ready" );
 				return null;
@@ -603,57 +597,23 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	public CompletableFuture<Void> next( NextArguments args ) {
-
-		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "Next request received for thread: " + args.getThreadId() );
-
-			if ( vmController == null ) {
-				LOGGER.warning( "BreakpointManager not available for Next request" );
-				return null;
-			}
-
-			// Perform step in for the specified thread
-			vmController.stepThread( args.getThreadId() );
-
-			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
-			return null;
-		} );
+		return step( args.getThreadId(), StepRequest.STEP_OVER, args.getSingleThread() );
 	}
 
 	public CompletableFuture<Void> stepIn( StepInArguments args ) {
-
-		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "Next request received for thread: " + args.getThreadId() );
-
-			if ( vmController == null ) {
-				LOGGER.warning( "BreakpointManager not available for Next request" );
-				return null;
-			}
-
-			// Perform step in for the specified thread
-			vmController.stepInThread( args.getThreadId() );
-
-			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
-			return null;
-		} );
+		return step( args.getThreadId(), StepRequest.STEP_INTO, args.getSingleThread() );
 	}
 
 	public CompletableFuture<Void> stepOut( StepOutArguments args ) {
+		return step( args.getThreadId(), StepRequest.STEP_OUT, args.getSingleThread() );
+	}
 
-		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "Next request received for thread: " + args.getThreadId() );
-
-			if ( vmController == null ) {
-				LOGGER.warning( "BreakpointManager not available for Next request" );
-				return null;
-			}
-
-			// Perform step in for the specified thread
-			vmController.stepOutThread( args.getThreadId() );
-
-			LOGGER.info( "Next request completed for thread: " + args.getThreadId() );
-			return null;
-		} );
+	private CompletableFuture<Void> step( int threadId, int depth, Boolean singleThread ) {
+		return CompletableFuture.completedFuture( threadId ).thenAccept( id -> {
+			if ( vmController == null )
+				throw new IllegalArgumentException( "No active debug session" );
+			vmController.stepThread( id, depth, Boolean.TRUE.equals( singleThread ) );
+		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "step", error ) ) );
 	}
 
 	/**
@@ -700,63 +660,31 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<ScopesResponse> scopes( ScopesArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			try {
-				LOGGER.info( "Scopes request received for frame: " + args.getFrameId() );
-
-				ScopesResponse				response			= new ScopesResponse();
-				Optional<BreakpointContext>	breakpointContext	= this.vmController.getBreakpointContextbyStackFrame( args.getFrameId() );
-
-				List<Scope>					scopes				= breakpointContext
-				    .map( context -> context.getVisibleScopes( args.getFrameId() ) )
-				    .orElseGet( () -> CompletableFuture.completedFuture( new ArrayList<Value>() ) )
-				    .thenApply( scopeList -> {
-																	    return scopeList
-																	        .stream()
-																	        .map( scope -> ( Scope ) variableManager
-																	            .convertScopeToDAPScope( scope ) )
-																	        .collect( Collectors.toList() );
-																    } )
-				    .exceptionally( e -> {
-					    LOGGER.severe( "Error getting suspended debug thread: " + e.getMessage() );
-					    return new ArrayList<>();
-				    } ).join();
-
-				response.setScopes( scopes.toArray( Scope[]::new ) );
-
-				LOGGER.info( "Returning " + scopes.size() + " scopes for frame " + args.getFrameId() );
-				return response;
-
-			} catch ( Exception e ) {
-				LOGGER.severe( "Error processing scopes request: " + e.getMessage() );
-				e.printStackTrace();
-
-				// Return empty response on error
+		return CompletableFuture.completedFuture( args ).thenCompose( request -> {
+			if ( vmController == null )
+				throw new IllegalArgumentException( "No active debug session for stack frame " + args.getFrameId() );
+			BreakpointContext context = vmController.getBreakpointContextbyStackFrame( args.getFrameId() )
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired stack frame " + args.getFrameId() ) );
+			return context.getVisibleScopes( args.getFrameId() ).thenApplyAsync( values -> {
+				Scope[] scopes = values.stream().map( value -> context.getVariables().convertScopeToDAPScope( value ) ).toArray( Scope[]::new );
+				context.checkActive();
 				ScopesResponse response = new ScopesResponse();
-				response.setScopes( new Scope[ 0 ] );
+				response.setScopes( scopes );
 				return response;
-			}
-		} );
+			} );
+		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "read scopes", error ) ) );
 	}
 
 	@Override
 	public CompletableFuture<VariablesResponse> variables( VariablesArguments args ) {
 		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "Variables request received for variables reference: " + args.getVariablesReference() );
-
-			// For now, we will return an empty response
+			if ( vmController == null )
+				throw new IllegalArgumentException( "No active debug session for variables reference " + args.getVariablesReference() );
 			VariablesResponse response = new VariablesResponse();
-
-			try {
-				response.setVariables(
-				    variableManager.getVariablesFor( args.getVariablesReference() ).toArray( new org.eclipse.lsp4j.debug.Variable[ 0 ] ) );
-			} catch ( Exception e ) {
-				LOGGER.severe( "Error processing variables request: " + e.getMessage() );
-				e.printStackTrace();
-			}
-
+			response.setVariables( vmController.getVariables( args.getVariablesReference() )
+			    .getVariablesFor( args.getVariablesReference() ).toArray( Variable[]::new ) );
 			return response;
-		} );
+		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "read variables", error ) ) );
 	}
 
 	@Override
@@ -773,26 +701,29 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return dumpRequestHandler.handle( args );
 			}
 
+			BreakpointContext context = vmController.getBreakpointContextbyStackFrame( args.getFrameId() )
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired stack frame " + args.getFrameId() ) );
 			return vmController.evaluateExpressionInFrame( args.getFrameId(), expr )
 			    .thenApply( evalValue -> {
-				    Variable		evalVariable	= variableManager.convertValueToVariable( "result", evalValue, expr );
+				    Variable		evalVariable	= context.getVariables().convertValueToVariable( "result", evalValue, expr );
 				    EvaluateResponse response		= new EvaluateResponse();
 				    response.setResult( evalVariable.getValue() );
 				    response.setType( evalVariable.getType() );
 				    response.setVariablesReference( evalVariable.getVariablesReference() );
 				    return response;
 			    } );
-		} ).exceptionallyCompose( error -> {
-			while ( error instanceof CompletionException && error.getCause() != null ) {
-				error = error.getCause();
-			}
-			String detail = error instanceof InvalidStackFrameException
-			    ? "The stack frame has expired. Evaluate again after the next pause."
-			    : ( error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName() );
-			// DAP sends success=false and this message; the session remains active.
-			return CompletableFuture.failedFuture( new ResponseErrorException(
-			    new ResponseError( ResponseErrorCode.UnknownErrorCode, "Unable to evaluate expression: " + detail, null ) ) );
-		} );
+		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "evaluate expression", error ) ) );
+	}
+
+	private ResponseErrorException requestError( String operation, Throwable error ) {
+		while ( error instanceof CompletionException && error.getCause() != null ) {
+			error = error.getCause();
+		}
+		String detail = error instanceof InvalidStackFrameException
+		    ? "The stack frame has expired. Try again after the next pause."
+		    : ( error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName() );
+		return new ResponseErrorException( new ResponseError( ResponseErrorCode.UnknownErrorCode,
+		    "Unable to " + operation + ": " + detail, null ) );
 	}
 
 	/**
@@ -1144,25 +1075,14 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<ContinueResponse> continue_( org.eclipse.lsp4j.debug.ContinueArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "Continue request received for thread: " + args.getThreadId() );
-
-			if ( vmController == null ) {
-				LOGGER.warning( "BreakpointManager not available for continue request" );
-				return new ContinueResponse();
-			}
-
-			// Resume execution for all threads to ensure the VM resumes from suspended state
-			vmController.getBreakpointContextByThread( args.getThreadId() ).ifPresent( context -> {
-				context.resume();
-			} );
-
-			LOGGER.info( "Continue request completed for thread: " + args.getThreadId() );
-
+		// Execute at receipt, not on a queued task that could target a later stop.
+		return CompletableFuture.completedFuture( args ).thenApply( request -> {
+			if ( vmController == null )
+				throw new IllegalArgumentException( "No active debug session" );
 			ContinueResponse response = new ContinueResponse();
-			response.setAllThreadsContinued( true ); // Indicate that all threads will continue
+			response.setAllThreadsContinued( vmController.continueExecution( args.getThreadId(), Boolean.TRUE.equals( args.getSingleThread() ) ) );
 			return response;
-		} );
+		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "continue", error ) ) );
 	}
 
 	@Override

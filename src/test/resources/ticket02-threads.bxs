@@ -1,0 +1,6 @@
+probe = new Ticket02Threads();
+systemOutput("ready"); // bootstrap: component is loaded
+bx:thread name="ticket02a" { probe.run("first"); }
+bx:thread name="ticket02b" { probe.run("second"); }
+bx:thread action="join" name="ticket02a,ticket02b";
+sleep(30000);
