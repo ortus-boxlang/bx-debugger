@@ -9,7 +9,6 @@ import java.util.concurrent.TimeUnit;
 import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.ExitedEventArguments;
 import org.eclipse.lsp4j.debug.TerminatedEventArguments;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -78,7 +77,7 @@ class DisconnectRequestHandlingTest {
 		assertTrue( debugServer.isSessionCleaned(), "session cleaned after restart disconnect" );
 	}
 
-	private static class TestDebugClient implements IDebugProtocolClient {
+	private static class TestDebugClient implements IBoxLangDebugClient {
 
 		private CountDownLatch	exitLatch;
 		private CountDownLatch	terminatedLatch;

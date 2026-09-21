@@ -501,7 +501,7 @@ public class VMController {
 				    var			evalFuture	= InvokeTools.submitAndInvoke(
 				        this,
 				        runtime,
-				        "executeStatement",
+				        "executeSource",
 				        List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
 				        List.of( vm.mirrorOf( expression ), context )
 				    );

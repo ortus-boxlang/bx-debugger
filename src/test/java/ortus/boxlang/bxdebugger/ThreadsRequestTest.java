@@ -20,7 +20,6 @@ import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.eclipse.lsp4j.debug.Thread;
 import org.eclipse.lsp4j.debug.ThreadsResponse;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 import org.junit.jupiter.api.AfterEach;
@@ -63,8 +62,9 @@ public class ThreadsRequestTest {
 				// Create debug server and handle the connection
 				BoxDebugServer					debugServer	= new BoxDebugServer();
 
-				Launcher<IDebugProtocolClient>	launcher	= org.eclipse.lsp4j.debug.launch.DSPLauncher.createServerLauncher(
+				Launcher<IBoxLangDebugClient>	launcher	= org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher.createLauncher(
 				    debugServer,
+				    IBoxLangDebugClient.class,
 				    clientSocket.socket().getInputStream(),
 				    clientSocket.socket().getOutputStream()
 				);
@@ -104,7 +104,7 @@ public class ThreadsRequestTest {
 	/**
 	 * Test debug client implementation for threads request testing
 	 */
-	public static class TestDebugClient implements IDebugProtocolClient {
+	public static class TestDebugClient implements IBoxLangDebugClient {
 
 		private static final Logger LOGGER = Logger.getLogger( TestDebugClient.class.getName() );
 

@@ -27,18 +27,26 @@ import ortus.boxlang.runtime.dynamic.casters.StringCaster;
 
 public class VariableManager {
 
-	private static final Logger	LOGGER		= Logger.getLogger( VariableManager.class.getName() );
-	private int					variableId	= 0;
-	private VMController		vmController;
-	private Map<Integer, Value>	variables	= new WeakHashMap<>();
+	private static final Logger				LOGGER			= Logger.getLogger( VariableManager.class.getName() );
+	private int								variableId		= 0;
+	private VMController					vmController;
+	private Map<Integer, Value>				variables		= new WeakHashMap<>();
+	private Map<Integer, String>			evaluateNames	= new WeakHashMap<>();
 
 	public VariableManager( VMController vmController ) {
 		this.vmController = vmController;
 	}
 
 	public int put( Value value ) {
+		return put( value, null );
+	}
+
+	public int put( Value value, String evaluateName ) {
 		variableId++;
 		variables.put( variableId, value );
+		if ( evaluateName != null ) {
+			evaluateNames.put( variableId, evaluateName );
+		}
 		return variableId;
 	}
 
@@ -48,13 +56,14 @@ public class VariableManager {
 
 	public List<Variable> getVariablesFor( int id ) {
 		var variable = variables.get( id );
+		String parentEvaluateName = evaluateNames.getOrDefault( id, "" );
 
 		if ( isStruct( variable ) ) {
-			return gerVariablesFromStruct( ( ObjectReference ) variable );
+			return gerVariablesFromStruct( ( ObjectReference ) variable, parentEvaluateName );
 		} else if ( isArray( variable ) ) {
-			return gerVariablesFromArray( ( ObjectReference ) variable );
+			return gerVariablesFromArray( ( ObjectReference ) variable, parentEvaluateName );
 		} else if ( isPOJO( variable ) ) {
-			return gerVariablesFromPojo( ( ObjectReference ) variable );
+			return gerVariablesFromPojo( ( ObjectReference ) variable, parentEvaluateName );
 		}
 
 		return List.of();
@@ -62,6 +71,7 @@ public class VariableManager {
 
 	public void clear() {
 		variables.clear();
+		evaluateNames.clear();
 	}
 
 	public int getVariableId( Value value ) {
@@ -92,9 +102,11 @@ public class VariableManager {
 		    .join();
 
 		scope.setName( name );
-		scope.setVariablesReference( variableId++ );
-
-		this.variables.put( scope.getVariablesReference(), scopeValue );
+		// Named scopes (server, application, request, etc.) require scope-qualified expressions.
+		// The variables scope is the unqualified local scope, so no prefix is needed there.
+		String	scopeParentEvaluateName	= name.equalsIgnoreCase( "variables" ) ? "" : name.toLowerCase();
+		int		ref						= put( scopeValue, scopeParentEvaluateName );
+		scope.setVariablesReference( ref );
 
 		LOGGER.info( "Scope created with name: " + name + " and variablesReference: " + scope.getVariablesReference() );
 
@@ -110,7 +122,7 @@ public class VariableManager {
 		    .stream().anyMatch( ( i ) -> i.name().equalsIgnoreCase( "ortus.boxlang.runtime.types.IStruct" ) );
 	}
 
-	private List<Variable> gerVariablesFromArray( ObjectReference array ) {
+	private List<Variable> gerVariablesFromArray( ObjectReference array, String parentEvaluateName ) {
 		ArrayReference table;
 		try {
 			table = ( ArrayReference ) this.vmController.invoke( array, "toArray", new ArrayList<String>(), new ArrayList<Value>() ).get();
@@ -126,13 +138,15 @@ public class VariableManager {
 		List<Variable> vars = new ArrayList<Variable>();
 
 		for ( int i = 0; i < table.length(); i++ ) {
-			vars.add( convertValueToVariable( Integer.toString( i + 1 ), table.getValue( i ) ) );
+			String indexName = Integer.toString( i + 1 );
+			String childEvaluateName = parentEvaluateName.isEmpty() ? indexName : parentEvaluateName + "[" + indexName + "]";
+			vars.add( convertValueToVariable( indexName, table.getValue( i ), childEvaluateName ) );
 		}
 
 		return vars;
 	}
 
-	private List<Variable> gerVariablesFromPojo( ObjectReference pojo ) {
+	private List<Variable> gerVariablesFromPojo( ObjectReference pojo, String parentEvaluateName ) {
 		// in this case we want to get the properties of the POJO
 		List<Variable> vars = new ArrayList<Variable>();
 
@@ -142,13 +156,14 @@ public class VariableManager {
 				continue;
 			}
 			Value val = pojo.getValue( field );
-			vars.add( convertValueToVariable( field.name(), val ) );
+			String childEvaluateName = parentEvaluateName.isEmpty() ? field.name() : parentEvaluateName + "." + field.name();
+			vars.add( convertValueToVariable( field.name(), val, childEvaluateName ) );
 		}
 
 		return vars;
 	}
 
-	private List<Variable> gerVariablesFromStruct( ObjectReference struct ) {
+	private List<Variable> gerVariablesFromStruct( ObjectReference struct, String parentEvaluateName ) {
 		try {
 			return this.vmController.invoke( struct, "entrySet", new ArrayList<String>(), new ArrayList<Value>() )
 			    .thenCompose( ref -> this.vmController.invoke( ( ObjectReference ) ref, "toArray", new ArrayList<String>(), new ArrayList<Value>() ) )
@@ -161,7 +176,8 @@ public class VariableManager {
 					        try {
 						        String keyName = getNameFromEntry( entry ).join();
 						        Value val = getValueFromEntry( entry ).join();
-						        return convertValueToVariable( keyName, val );
+						        String childEvaluateName = parentEvaluateName.isEmpty() ? keyName : parentEvaluateName + "." + keyName;
+						        return convertValueToVariable( keyName, val, childEvaluateName );
 
 					        } catch ( Exception e ) {
 						        LOGGER.severe( "Error getting key name from struct entry: " + e.getMessage() );
@@ -207,10 +223,15 @@ public class VariableManager {
 	}
 
 	public Variable convertValueToVariable( String name, Value val ) {
+		return convertValueToVariable( name, val, name );
+	}
+
+	public Variable convertValueToVariable( String name, Value val, String evaluateName ) {
 		Variable var = new Variable();
 		var.setType( "null" );
 		var.setValue( "" );
 		var.setName( name );
+		var.setEvaluateName( evaluateName );
 
 		if ( val == null ) {
 			var.setValue( "null" );
@@ -251,11 +272,11 @@ public class VariableManager {
 		} else if ( isOfType( val, "ortus.boxlang.runtime.types.array" ) ) {
 			var.setType( "array" );
 			var.setValue( "[]" );
-			var.setVariablesReference( put( val ) );
+			var.setVariablesReference( put( val, evaluateName ) );
 		} else if ( isStruct( val ) ) {
 			var.setType( "Struct" );
 			var.setValue( "{}" );
-			var.setVariablesReference( put( val ) );
+			var.setVariablesReference( put( val, evaluateName ) );
 		} else if ( hasSuperClass( val, "ortus.boxlang.runtime.types.Closure" ) ) {
 			var.setType( "closure" );
 			var.setValue( "closure" );
@@ -268,7 +289,7 @@ public class VariableManager {
 		} else if ( val != null ) {
 			var.setType( val.type().name() );
 			var.setValue( val.type().name() );
-			var.setVariablesReference( put( val ) );
+			var.setVariablesReference( put( val, evaluateName ) );
 		}
 
 		return var;

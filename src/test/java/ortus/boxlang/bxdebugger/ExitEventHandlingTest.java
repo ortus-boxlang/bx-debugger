@@ -9,7 +9,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.lsp4j.debug.ExitedEventArguments;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -73,7 +72,7 @@ class ExitEventHandlingTest {
 	/**
 	 * Test client implementation for capturing events
 	 */
-	private static class TestDebugClient implements IDebugProtocolClient {
+	private static class TestDebugClient implements IBoxLangDebugClient {
 
 		private int				lastExitCode	= -1;
 		private CountDownLatch	exitLatch;

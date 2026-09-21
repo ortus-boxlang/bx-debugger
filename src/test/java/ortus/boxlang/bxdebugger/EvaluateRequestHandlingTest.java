@@ -20,7 +20,7 @@ import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
 import org.eclipse.lsp4j.debug.EvaluateResponse;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
+import org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 import org.junit.jupiter.api.AfterEach;
@@ -52,8 +52,9 @@ public class EvaluateRequestHandlingTest {
 				SocketChannel					clientSocket	= serverSocket.accept();
 				BoxDebugServer					debugServer		= new BoxDebugServer();
 
-				Launcher<IDebugProtocolClient>	launcher		= org.eclipse.lsp4j.debug.launch.DSPLauncher.createServerLauncher(
-				    debugServer,
+					Launcher<IBoxLangDebugClient>		launcher		= org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher.createLauncher(
+					    debugServer,
+					    IBoxLangDebugClient.class,
 				    clientSocket.socket().getInputStream(),
 				    clientSocket.socket().getOutputStream()
 				);
@@ -89,7 +90,7 @@ public class EvaluateRequestHandlingTest {
 		}
 	}
 
-	public static class TestDebugClient implements IDebugProtocolClient {
+	public static class TestDebugClient implements IBoxLangDebugClient {
 
 		@Override
 		public void initialized() {

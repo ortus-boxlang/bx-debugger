@@ -66,7 +66,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	// Debug session state
 	private VirtualMachine									vm;
-	private IDebugProtocolClient							client;
+	private IBoxLangDebugClient								client;
 	private ExecutorService									outputMonitorExecutor;
 	private VMController									vmController;
 	private VariableManager									variableManager;
@@ -77,6 +77,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	// BoxLang debugging configuration
 	private String											debugMode				= "BoxLang"; // Default to BoxLang mode
+	private int												dumpTop					= 2; // Default top depth for writeDump
+
+	// Dump handling
+	private final DumpExpressionParser						dumpExpressionParser	= new DumpExpressionParser();
+	private DumpRequestHandler								dumpRequestHandler;
 
 	// Exit handling state
 	private volatile boolean								sessionCleaned			= false;
@@ -100,7 +105,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	/**
 	 * Connect to the language client
 	 */
-	public void connect( IDebugProtocolClient client ) {
+	public void connect( IBoxLangDebugClient client ) {
 		this.client				= client;
 		this.sessionStartTime	= System.currentTimeMillis();
 		LOGGER.info( "Connected to debug client" );
@@ -127,6 +132,17 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			debugMode = requestedMode;
 		}
 		LOGGER.info( "Debug mode set to: " + debugMode );
+
+		Object dumpTopArg = args.get( "dumpTop" );
+		if ( dumpTopArg instanceof Number n ) {
+			dumpTop = n.intValue();
+		} else if ( dumpTopArg instanceof String s ) {
+			try {
+				dumpTop = Integer.parseInt( s );
+			} catch ( NumberFormatException ignored ) {
+			}
+		}
+		LOGGER.info( "Dump top depth set to: " + dumpTop );
 
 		String	localRoot		= ( String ) args.get( "localRoot" );
 		String	remoteRoot		= ( String ) args.get( "remoteRoot" );
@@ -250,6 +266,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					vmController = new VMController( old, vm, client );
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
+				dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
 
 				// Start event processing so we can catch ClassPrepareEvents for breakpoints
 				vmController.startEventProcessing();
@@ -311,6 +328,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					vmController = new VMController( old, vm, client );
 					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
 				}
+				dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
 
 				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
 				vmController.startEventProcessing();
@@ -740,10 +758,15 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		return CompletableFuture.supplyAsync( () -> {
 			LOGGER.info( "Evaluate request received. context=" + args.getContext() + ", expr=" + args.getExpression() );
 
-			EvaluateResponse	response	= new EvaluateResponse();
+			String expr = args.getExpression();
 
-			int					frameId		= args.getFrameId();
-			String				expr		= args.getExpression();
+			if ( dumpExpressionParser.isDumpCall( expr ) && dumpRequestHandler != null ) {
+				return dumpRequestHandler.handle( args );
+			}
+
+			EvaluateResponse response = new EvaluateResponse();
+
+			int frameId = args.getFrameId();
 
 			this.vmController.evaluateExpressionInFrame( frameId, expr )
 			    .thenAccept( evalValue -> {
