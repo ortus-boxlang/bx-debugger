@@ -52,9 +52,9 @@ public class EvaluateRequestHandlingTest {
 				SocketChannel					clientSocket	= serverSocket.accept();
 				BoxDebugServer					debugServer		= new BoxDebugServer();
 
-					Launcher<IBoxLangDebugClient>		launcher		= org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher.createLauncher(
-					    debugServer,
-					    IBoxLangDebugClient.class,
+				Launcher<IBoxLangDebugClient>	launcher		= org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher.createLauncher(
+				    debugServer,
+				    IBoxLangDebugClient.class,
 				    clientSocket.socket().getInputStream(),
 				    clientSocket.socket().getOutputStream()
 				);

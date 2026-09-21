@@ -27,11 +27,11 @@ import ortus.boxlang.runtime.dynamic.casters.StringCaster;
 
 public class VariableManager {
 
-	private static final Logger				LOGGER			= Logger.getLogger( VariableManager.class.getName() );
-	private int								variableId		= 0;
-	private VMController					vmController;
-	private Map<Integer, Value>				variables		= new WeakHashMap<>();
-	private Map<Integer, String>			evaluateNames	= new WeakHashMap<>();
+	private static final Logger		LOGGER			= Logger.getLogger( VariableManager.class.getName() );
+	private int						variableId		= 0;
+	private VMController			vmController;
+	private Map<Integer, Value>		variables		= new WeakHashMap<>();
+	private Map<Integer, String>	evaluateNames	= new WeakHashMap<>();
 
 	public VariableManager( VMController vmController ) {
 		this.vmController = vmController;
@@ -55,8 +55,8 @@ public class VariableManager {
 	}
 
 	public List<Variable> getVariablesFor( int id ) {
-		var variable = variables.get( id );
-		String parentEvaluateName = evaluateNames.getOrDefault( id, "" );
+		var		variable			= variables.get( id );
+		String	parentEvaluateName	= evaluateNames.getOrDefault( id, "" );
 
 		if ( isStruct( variable ) ) {
 			return gerVariablesFromStruct( ( ObjectReference ) variable, parentEvaluateName );
@@ -138,8 +138,8 @@ public class VariableManager {
 		List<Variable> vars = new ArrayList<Variable>();
 
 		for ( int i = 0; i < table.length(); i++ ) {
-			String indexName = Integer.toString( i + 1 );
-			String childEvaluateName = parentEvaluateName.isEmpty() ? indexName : parentEvaluateName + "[" + indexName + "]";
+			String	indexName			= Integer.toString( i + 1 );
+			String	childEvaluateName	= parentEvaluateName.isEmpty() ? indexName : parentEvaluateName + "[" + indexName + "]";
 			vars.add( convertValueToVariable( indexName, table.getValue( i ), childEvaluateName ) );
 		}
 
@@ -155,8 +155,8 @@ public class VariableManager {
 			if ( field.isStatic() ) {
 				continue;
 			}
-			Value val = pojo.getValue( field );
-			String childEvaluateName = parentEvaluateName.isEmpty() ? field.name() : parentEvaluateName + "." + field.name();
+			Value	val					= pojo.getValue( field );
+			String	childEvaluateName	= parentEvaluateName.isEmpty() ? field.name() : parentEvaluateName + "." + field.name();
 			vars.add( convertValueToVariable( field.name(), val, childEvaluateName ) );
 		}
 
@@ -174,8 +174,8 @@ public class VariableManager {
 				        .filter( entry -> entry != null )
 				        .map( entry -> {
 					        try {
-						        String keyName = getNameFromEntry( entry ).join();
-						        Value val = getValueFromEntry( entry ).join();
+						        String keyName		= getNameFromEntry( entry ).join();
+						        Value val			= getValueFromEntry( entry ).join();
 						        String childEvaluateName = parentEvaluateName.isEmpty() ? keyName : parentEvaluateName + "." + keyName;
 						        return convertValueToVariable( keyName, val, childEvaluateName );
 

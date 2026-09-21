@@ -764,9 +764,9 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				return dumpRequestHandler.handle( args );
 			}
 
-			EvaluateResponse response = new EvaluateResponse();
+			EvaluateResponse	response	= new EvaluateResponse();
 
-			int frameId = args.getFrameId();
+			int					frameId		= args.getFrameId();
 
 			this.vmController.evaluateExpressionInFrame( frameId, expr )
 			    .thenAccept( evalValue -> {
