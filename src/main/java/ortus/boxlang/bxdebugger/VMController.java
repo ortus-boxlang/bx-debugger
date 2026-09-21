@@ -491,29 +491,19 @@ public class VMController {
 	}
 
 	public CompletableFuture<Value> evaluateExpressionInFrame( int frameId, String expression ) {
-		return getBreakpointContextbyStackFrame( frameId )
-		    .map( bpContext -> {
-			    try {
-
-				    ObjectReference context	= bpContext.getContext();
-				    ObjectReference runtime	= ( ObjectReference ) getRuntime().join();
-
-				    var			evalFuture	= InvokeTools.submitAndInvoke(
-				        this,
-				        runtime,
-				        "executeSource",
-				        List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
-				        List.of( vm.mirrorOf( expression ), context )
-				    );
-
-				    return evalFuture;
-			    } catch ( Exception e ) {
-				    int i = 0;
-
-				    return null;
-			    }
-		    } )
-		    .orElseGet( () -> CompletableFuture.completedFuture( null ) );
+		return CompletableFuture.completedFuture( frameId ).thenCompose( id -> {
+			BreakpointContext	bpContext	= getBreakpointContextbyStackFrame( id )
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired stack frame " + id ) );
+			ObjectReference		context		= bpContext.getContext( id )
+			    .orElseThrow( () -> new IllegalStateException( "No BoxLang context for frame " + id ) );
+			return getRuntime().thenCompose( runtime -> InvokeTools.submitAndInvoke(
+			    this,
+			    ( ObjectReference ) runtime,
+			    "executeSource",
+			    List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
+			    List.of( vm.mirrorOf( expression ), context )
+			) );
+		} );
 	}
 
 	public void stepThread( long threadId ) {

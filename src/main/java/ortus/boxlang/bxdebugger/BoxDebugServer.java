@@ -10,6 +10,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException;
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError;
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
@@ -52,6 +57,7 @@ import org.eclipse.lsp4j.debug.VariablesResponse;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 
+import com.sun.jdi.InvalidStackFrameException;
 import com.sun.jdi.Value;
 import com.sun.jdi.VirtualMachine;
 
@@ -755,29 +761,37 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<EvaluateResponse> evaluate( EvaluateArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
+		return CompletableFuture.completedFuture( args ).thenCompose( request -> {
 			LOGGER.info( "Evaluate request received. context=" + args.getContext() + ", expr=" + args.getExpression() );
 
 			String expr = args.getExpression();
+			if ( args.getFrameId() == null || vmController == null ) {
+				throw new IllegalArgumentException( "Evaluation requires a stopped stack frame" );
+			}
 
 			if ( dumpExpressionParser.isDumpCall( expr ) && dumpRequestHandler != null ) {
 				return dumpRequestHandler.handle( args );
 			}
 
-			EvaluateResponse	response	= new EvaluateResponse();
-
-			int					frameId		= args.getFrameId();
-
-			this.vmController.evaluateExpressionInFrame( frameId, expr )
-			    .thenAccept( evalValue -> {
-				    Variable evalVariable = variableManager.convertValueToVariable( "result", evalValue );
-
-				    evalVariable.setVariablesReference( variableManager.put( evalValue ) );
-
+			return vmController.evaluateExpressionInFrame( args.getFrameId(), expr )
+			    .thenApply( evalValue -> {
+				    Variable		evalVariable	= variableManager.convertValueToVariable( "result", evalValue, expr );
+				    EvaluateResponse response		= new EvaluateResponse();
 				    response.setResult( evalVariable.getValue() );
-			    } ).join();
-
-			return response;
+				    response.setType( evalVariable.getType() );
+				    response.setVariablesReference( evalVariable.getVariablesReference() );
+				    return response;
+			    } );
+		} ).exceptionallyCompose( error -> {
+			while ( error instanceof CompletionException && error.getCause() != null ) {
+				error = error.getCause();
+			}
+			String detail = error instanceof InvalidStackFrameException
+			    ? "The stack frame has expired. Evaluate again after the next pause."
+			    : ( error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName() );
+			// DAP sends success=false and this message; the session remains active.
+			return CompletableFuture.failedFuture( new ResponseErrorException(
+			    new ResponseError( ResponseErrorCode.UnknownErrorCode, "Unable to evaluate expression: " + detail, null ) ) );
 		} );
 	}
 
@@ -805,7 +819,10 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Get all stack frames from the breakpoint manager
 			List<StackFrame>		allFrames		= vmController.getBreakpointContextByThread( threadId )
 			    .map( ctx -> ctx.getStackFrames() )
-			    .orElse( new ArrayList<>() );
+			    .orElseGet( () -> {
+														    LOGGER.warning( "No suspended context for stack trace thread " + threadId );
+														    return List.of();
+													    } );
 
 			// Convert to BoxLang stack frames and apply filtering based on mode
 			List<BoxLangStackFrame>	boxLangFrames	= new ArrayList<>();
@@ -815,10 +832,13 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			// Filter frames based on debug mode
-			List<StackFrame>	filteredFrames	= filterStackFramesByMode( boxLangFrames, mode );
+			List<StackFrame> filteredFrames = filterStackFramesByMode( boxLangFrames, mode );
+			if ( !allFrames.isEmpty() && filteredFrames.isEmpty() ) {
+				LOGGER.warning( "All " + allFrames.size() + " stack frames were filtered out for thread " + threadId + " in " + mode + " mode" );
+			}
 
 			// Set total before pagination
-			int					total			= filteredFrames.size();
+			int total = filteredFrames.size();
 			response.setTotalFrames( total );
 
 			// Apply pagination per DAP (startFrame default 0; levels optional)

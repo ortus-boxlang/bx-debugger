@@ -1,6 +1,9 @@
 package ortus.boxlang.bxdebugger;
 
 import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
+
+import com.sun.jdi.StringReference;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.EvaluateArguments;
@@ -44,9 +47,9 @@ public class DumpRequestHandler {
 	 *
 	 * @return an {@link EvaluateResponse} containing a confirmation message
 	 */
-	public EvaluateResponse handle( EvaluateArguments args ) {
+	public CompletableFuture<EvaluateResponse> handle( EvaluateArguments args ) {
 		String	expression	= args.getExpression();
-		int		frameId		= args.getFrameId() != null ? args.getFrameId() : 0;
+		int		frameId		= args.getFrameId();
 
 		String	label		= parser.extractLabel( expression );
 		int		top			= parser.extractTopArg( expression ).orElse( defaultTop );
@@ -56,40 +59,23 @@ public class DumpRequestHandler {
 
 		LOGGER.info( "Executing dump for label='" + label + "' top=" + top + " frameId=" + frameId );
 
-		String					html		= executeDumpScript( frameId, script );
-
-		BoxLangDumpEventBody	eventBody	= new BoxLangDumpEventBody(
-		    html != null ? html : "",
-		    label,
-		    Instant.now().toString()
-		);
-		client.boxlangDump( eventBody );
-
-		EvaluateResponse response = new EvaluateResponse();
-		response.setResult( "Variable '" + label + "' dumped to editor" );
-		response.setVariablesReference( 0 );
-		return response;
+		return vmController.evaluateExpressionInFrame( frameId, script ).thenApply( result -> {
+			if ( ! ( result instanceof StringReference html ) || html.value().isBlank() ) {
+				throw new IllegalStateException( "Dump produced no HTML output" );
+			}
+			client.boxlangDump( new BoxLangDumpEventBody( html.value(), label, Instant.now().toString() ) );
+			EvaluateResponse response = new EvaluateResponse();
+			response.setResult( "Variable '" + label + "' dumped to editor" );
+			response.setVariablesReference( 0 );
+			return response;
+		} );
 	}
 
 	private String buildDumpScript( String varExpr, int top ) {
-		// return "return 'test'";
 		return "bx:savecontent variable=\"__bxDumpOutput__\" {\n"
 		    + " writeDump( var=" + varExpr + ", top=" + top + ", format='html', output='buffer' )\n"
 		    + "}\n"
 		    + "return __bxDumpOutput__;";
 	}
 
-	private String executeDumpScript( int frameId, String script ) {
-		try {
-			var result = vmController.evaluateExpressionInFrame( frameId, script ).join();
-			if ( result == null ) {
-				LOGGER.warning( "Dump script returned null" );
-				return null;
-			}
-			return result.toString();
-		} catch ( Exception e ) {
-			LOGGER.severe( "Error executing dump script: " + e.getMessage() );
-			return null;
-		}
-	}
 }

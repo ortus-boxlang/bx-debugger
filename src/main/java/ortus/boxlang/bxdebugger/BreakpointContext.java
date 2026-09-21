@@ -88,7 +88,7 @@ public class BreakpointContext {
 			return CompletableFuture.completedFuture( new ArrayList<>() );
 		}
 
-		var context = findNearestContextByFrameId( frameId );
+		var context = getContext( frameId );
 
 		return context.map( ctx -> invokeGetVisibleScopes( ctx ) )
 		    .orElse( CompletableFuture.completedFuture( new ArrayList<Value>() ) );
@@ -136,15 +136,21 @@ public class BreakpointContext {
 		    } );
 	}
 
-	private Optional<ObjectReference> findNearestContextByFrameId( int frameId ) {
+	public Optional<ObjectReference> getContext( int frameId ) {
+		if ( !stoppedThread.isSuspended() ) {
+			throw new IllegalArgumentException( "Expired stack frame " + frameId + ": thread has resumed" );
+		}
 
-		Optional<FrameTuple>	frameTuple	= stackFrames.stream()
+		Optional<FrameTuple> frameTuple = stackFrames.stream()
 		    .filter( frame -> frame.id == frameId )
 		    .findFirst();
 
-		var						frameIndex	= stackFrames.indexOf( frameTuple.get() );
+		if ( frameTuple.isEmpty() ) {
+			throw new IllegalArgumentException( "Unknown stack frame " + frameId );
+		}
+		var					frameIndex	= stackFrames.indexOf( frameTuple.get() );
 
-		List<StackFrame>		toSearch	= stackFrames.stream()
+		List<StackFrame>	toSearch	= stackFrames.stream()
 		    .skip( frameIndex )
 		    .map( ft -> ft.jdiFrame() )
 		    .collect( Collectors.toList() );

@@ -3,237 +3,237 @@ package ortus.boxlang.bxdebugger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.file.Path;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+
+import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
+import org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher;
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError;
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException;
+import java.util.Arrays;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
-import org.eclipse.lsp4j.debug.Capabilities;
+import org.eclipse.lsp4j.debug.ConfigurationDoneArguments;
+import org.eclipse.lsp4j.debug.ContinueArguments;
+import org.eclipse.lsp4j.debug.DisconnectArguments;
 import org.eclipse.lsp4j.debug.EvaluateArguments;
 import org.eclipse.lsp4j.debug.EvaluateResponse;
-import org.eclipse.lsp4j.debug.InitializeRequestArguments;
-import org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
-import org.eclipse.lsp4j.jsonrpc.Launcher;
+import org.eclipse.lsp4j.debug.SetBreakpointsArguments;
+import org.eclipse.lsp4j.debug.Source;
+import org.eclipse.lsp4j.debug.SourceBreakpoint;
+import org.eclipse.lsp4j.debug.StackFrame;
+import org.eclipse.lsp4j.debug.StackTraceArguments;
+import org.eclipse.lsp4j.debug.StoppedEventArguments;
+import org.eclipse.lsp4j.debug.Variable;
+import org.eclipse.lsp4j.debug.VariablesArguments;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
-public class EvaluateRequestHandlingTest {
+@Timeout( 60 )
+class EvaluateRequestHandlingTest {
 
-	private static final Logger	LOGGER		= Logger.getLogger( EvaluateRequestHandlingTest.class.getName() );
-	private static final int	TEST_PORT	= 5021;
-	private ExecutorService		serverExecutor;
-	private ServerSocketChannel	serverSocket;
-	private CountDownLatch		serverStartupLatch;
+	private IDebugProtocolServer								server;
+	private Socket												clientSocket;
+	private Socket												adapterSocket;
+	private final LinkedBlockingQueue<BoxLangDumpEventBody>		dumps	= new LinkedBlockingQueue<>();
+	private final LinkedBlockingQueue<StoppedEventArguments>	stops	= new LinkedBlockingQueue<>();
+	private StackFrame[]										frames;
+	private int													threadId;
 
 	@BeforeEach
-	void setUp() throws IOException {
-		serverExecutor		= Executors.newSingleThreadExecutor();
-		serverStartupLatch	= new CountDownLatch( 1 );
+	void stopInsideFunction() throws Exception {
+		BoxDebugServer adapter = new BoxDebugServer();
+		adapter.setFalseExit( true );
+		try ( ServerSocket listener = new ServerSocket( 0, 1, InetAddress.getLoopbackAddress() ) ) {
+			clientSocket	= new Socket( listener.getInetAddress(), listener.getLocalPort() );
+			adapterSocket	= listener.accept();
+		}
+		IBoxLangDebugClient	client			= new IBoxLangDebugClient() {
 
-		serverExecutor.submit( () -> {
-			try {
-				serverSocket = ServerSocketChannel.open();
-				serverSocket.bind( new InetSocketAddress( TEST_PORT ) );
-				serverStartupLatch.countDown();
+												@Override
+												public void stopped( StoppedEventArguments event ) {
+													stops.add( event );
+												}
 
-				SocketChannel					clientSocket	= serverSocket.accept();
-				BoxDebugServer					debugServer		= new BoxDebugServer();
-
-				Launcher<IBoxLangDebugClient>	launcher		= org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher.createLauncher(
-				    debugServer,
-				    IBoxLangDebugClient.class,
-				    clientSocket.socket().getInputStream(),
-				    clientSocket.socket().getOutputStream()
-				);
-
-				debugServer.connect( launcher.getRemoteProxy() );
-				launcher.startListening().get();
-
-			} catch ( Exception e ) {
-				LOGGER.severe( "Error in test debug server: " + e.getMessage() );
-			}
-		} );
+												@Override
+												public void boxlangDump( BoxLangDumpEventBody event ) {
+													dumps.add( event );
+												}
+											};
+		var					adapterLauncher	= DebugLauncher.createLauncher( adapter, IBoxLangDebugClient.class,
+		    adapterSocket.getInputStream(), adapterSocket.getOutputStream() );
+		adapter.connect( adapterLauncher.getRemoteProxy() );
+		adapterLauncher.startListening();
+		var clientLauncher = DebugLauncher.createLauncher( client, IDebugProtocolServer.class,
+		    clientSocket.getInputStream(), clientSocket.getOutputStream() );
+		clientLauncher.startListening();
+		server = clientLauncher.getRemoteProxy();
+		Path	program	= Path.of( "src/test/resources/ticket01-frames.bxs" ).toAbsolutePath();
+		Source	source	= new Source();
+		source.setPath( program.toString() );
+		SourceBreakpoint breakpoint = new SourceBreakpoint();
+		breakpoint.setLine( 2 );
+		SetBreakpointsArguments breakpoints = new SetBreakpointsArguments();
+		breakpoints.setSource( source );
+		breakpoints.setBreakpoints( new SourceBreakpoint[] { breakpoint } );
+		server.setBreakpoints( breakpoints ).get( 10, TimeUnit.SECONDS );
+		Path workspace = Path.of( "build/ticket01-workspace" ).toAbsolutePath();
+		server.launch( Map.of( "program", program.toString(), "localRoot", workspace.toString(),
+		    "remoteRoot", program.getParent().toString() ) ).get( 15, TimeUnit.SECONDS );
+		server.configurationDone( new ConfigurationDoneArguments() ).get( 10, TimeUnit.SECONDS );
+		StoppedEventArguments stop = stops.poll( 15, TimeUnit.SECONDS );
+		assertNotNull( stop, "Expected the bootstrap stop after loading the CFC" );
+		// Bind after class loading to isolate these tests from class-prepare races (ticket 03).
+		source.setPath( workspace.resolve( "Ticket01Frames.cfc" ).toString() );
+		SourceBreakpoint cfcBreakpoint = new SourceBreakpoint();
+		cfcBreakpoint.setLine( 9 );
+		breakpoints.setBreakpoints( new SourceBreakpoint[] { cfcBreakpoint } );
+		server.setBreakpoints( breakpoints ).get( 10, TimeUnit.SECONDS );
+		ContinueArguments resume = new ContinueArguments();
+		resume.setThreadId( stop.getThreadId() );
+		server.continue_( resume ).get( 5, TimeUnit.SECONDS );
+		stop = stops.poll( 15, TimeUnit.SECONDS );
+		assertNotNull( stop, "Expected a real CFC breakpoint stop" );
+		StackTraceArguments stack = new StackTraceArguments();
+		threadId = stop.getThreadId();
+		stack.setThreadId( threadId );
+		frames = server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames();
+		assertTrue( frames.length > 0 );
+		assertEquals( 9, frames[ 0 ].getLine() );
+		assertEquals( source.getPath(), frames[ 0 ].getSource().getPath() );
+		StackFrame[] repeated = server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames();
+		assertEquals( source.getPath(), repeated[ 0 ].getSource().getPath() );
 	}
 
 	@AfterEach
-	void tearDown() {
+	void disconnect() throws Exception {
+		DisconnectArguments args = new DisconnectArguments();
+		args.setTerminateDebuggee( true );
 		try {
-			if ( serverSocket != null && serverSocket.isOpen() ) {
-				serverSocket.close();
+			if ( server != null ) {
+				server.disconnect( args ).get( 10, TimeUnit.SECONDS );
 			}
-		} catch ( IOException e ) {
-			// ignore
-		}
-		if ( serverExecutor != null ) {
-			serverExecutor.shutdown();
-			try {
-				if ( !serverExecutor.awaitTermination( 5, TimeUnit.SECONDS ) ) {
-					serverExecutor.shutdownNow();
-				}
-			} catch ( InterruptedException e ) {
-				Thread.currentThread().interrupt();
-				serverExecutor.shutdownNow();
-			}
+		} finally {
+			if ( clientSocket != null )
+				clientSocket.close();
+			if ( adapterSocket != null )
+				adapterSocket.close();
 		}
 	}
 
-	public static class TestDebugClient implements IBoxLangDebugClient {
-
-		@Override
-		public void initialized() {
-		}
-
-		@Override
-		public void stopped( org.eclipse.lsp4j.debug.StoppedEventArguments args ) {
-		}
-
-		@Override
-		public void continued( org.eclipse.lsp4j.debug.ContinuedEventArguments args ) {
-		}
-
-		@Override
-		public void exited( org.eclipse.lsp4j.debug.ExitedEventArguments args ) {
-		}
-
-		@Override
-		public void terminated( org.eclipse.lsp4j.debug.TerminatedEventArguments args ) {
-		}
-
-		@Override
-		public void thread( org.eclipse.lsp4j.debug.ThreadEventArguments args ) {
-		}
-
-		@Override
-		public void output( org.eclipse.lsp4j.debug.OutputEventArguments args ) {
-		}
-
-		@Override
-		public void breakpoint( org.eclipse.lsp4j.debug.BreakpointEventArguments args ) {
-		}
-
-		@Override
-		public void module( org.eclipse.lsp4j.debug.ModuleEventArguments args ) {
-		}
-
-		@Override
-		public void loadedSource( org.eclipse.lsp4j.debug.LoadedSourceEventArguments args ) {
-		}
-
-		@Override
-		public void process( org.eclipse.lsp4j.debug.ProcessEventArguments args ) {
-		}
-
-		@Override
-		public void capabilities( org.eclipse.lsp4j.debug.CapabilitiesEventArguments args ) {
-		}
-
-		@Override
-		public void progressStart( org.eclipse.lsp4j.debug.ProgressStartEventArguments args ) {
-		}
-
-		@Override
-		public void progressUpdate( org.eclipse.lsp4j.debug.ProgressUpdateEventArguments args ) {
-		}
-
-		@Override
-		public void progressEnd( org.eclipse.lsp4j.debug.ProgressEndEventArguments args ) {
-		}
-
-		@Override
-		public void invalidated( org.eclipse.lsp4j.debug.InvalidatedEventArguments args ) {
-		}
-
-		@Override
-		public void memory( org.eclipse.lsp4j.debug.MemoryEventArguments args ) {
-		}
+	@ParameterizedTest
+	@ValueSource( strings = { "watch", "repl" } )
+	void evaluatedStructCanBeExpandedIntoItsValues( String context ) throws Exception {
+		EvaluateResponse result = evaluate( frames[ 0 ].getId(), "payload", context );
+		assertTrue( result.getVariablesReference() > 0, "Struct evaluation must expose its children" );
+		assertEquals( "Struct", result.getType() );
+		Variable answer = Arrays.stream( variables( result.getVariablesReference() ) )
+		    .filter( value -> value.getName().equalsIgnoreCase( "answer" ) ).findFirst().orElseThrow();
+		assertEquals( "42", answer.getValue() );
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
-	@DisplayName( "Evaluate in repl context returns string literal" )
-	@Disabled( "This test needs additional stack information to allow proper evaluation" )
-	public void testEvaluateReplStringLiteral() throws Exception {
-		assertTrue( serverStartupLatch.await( 5, TimeUnit.SECONDS ) );
+	void evaluatedArraysAndScalarsExposeAppropriateReferences() throws Exception {
+		EvaluateResponse array = evaluate( frames[ 0 ].getId(), "payload.items" );
+		assertEquals( "array", array.getType() );
+		assertTrue( array.getVariablesReference() > 0 );
+		Variable[] items = variables( array.getVariablesReference() );
+		assertEquals( 2, items.length );
+		assertEquals( "1", items[ 0 ].getName() );
+		assertEquals( "\"one\"", items[ 0 ].getValue() );
+		assertEquals( "payload.items[1]", items[ 0 ].getEvaluateName() );
+		assertEquals( "\"two\"", items[ 1 ].getValue() );
 
-		try ( SocketChannel clientSocket = SocketChannel.open() ) {
-			clientSocket.connect( new InetSocketAddress( "localhost", TEST_PORT ) );
-			TestDebugClient					testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>	launcher	= org.eclipse.lsp4j.debug.launch.DSPLauncher.createClientLauncher(
-			    testClient,
-			    clientSocket.socket().getInputStream(),
-			    clientSocket.socket().getOutputStream()
-			);
-			launcher.startListening();
-			IDebugProtocolServer			server		= launcher.getRemoteProxy();
-
-			InitializeRequestArguments		initArgs	= new InitializeRequestArguments();
-			CompletableFuture<Capabilities>	init		= server.initialize( initArgs );
-			assertNotNull( init.get( 5, TimeUnit.SECONDS ) );
-
-			// Launch a simple script, we don't need paused state for literal eval
-			Map<String, Object> launchArgs = Map.of(
-			    "program", "src/test/resources/output.bxs",
-			    "debugMode", "BoxLang"
-			);
-			server.launch( launchArgs ).get( 10, TimeUnit.SECONDS );
-
-			EvaluateArguments evalArgs = new EvaluateArguments();
-			evalArgs.setContext( "repl" );
-			evalArgs.setExpression( "\"hello world\"" );
-
-			EvaluateResponse resp = server.evaluate( evalArgs ).get( 5, TimeUnit.SECONDS );
-			assertNotNull( resp );
-			assertEquals( "hello world", resp.getResult() );
-		}
+		EvaluateResponse scalar = evaluate( frames[ 0 ].getId(), "payload.answer" );
+		assertEquals( "numeric", scalar.getType() );
+		assertEquals( "42", scalar.getResult() );
+		assertEquals( 0, scalar.getVariablesReference() );
+		EvaluateResponse nil = evaluate( frames[ 0 ].getId(), "null" );
+		assertEquals( "null", nil.getType() );
+		assertEquals( "null", nil.getResult() );
+		assertEquals( 0, nil.getVariablesReference() );
 	}
 
 	@Test
-	@Timeout( value = 30, unit = TimeUnit.SECONDS )
-	@DisplayName( "Evaluate in hover without pause returns error" )
-	@Disabled( "This test needs additional stack information to allow proper evaluation" )
-	public void testEvaluateHoverWithoutPauseReturnsError() throws Exception {
-		assertTrue( serverStartupLatch.await( 5, TimeUnit.SECONDS ) );
+	void evaluationUsesTheSelectedCallerFrame() throws Exception {
+		StackFrame caller = Arrays.stream( frames ).filter( frame -> frame.getLine() == 4 ).findFirst().orElseThrow();
+		assertEquals( "\"caller\"", evaluate( caller.getId(), "marker" ).getResult() );
+		assertEquals( "\"callee\"", evaluate( frames[ 0 ].getId(), "marker" ).getResult() );
+	}
 
-		try ( SocketChannel clientSocket = SocketChannel.open() ) {
-			clientSocket.connect( new InetSocketAddress( "localhost", TEST_PORT ) );
-			TestDebugClient					testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>	launcher	= org.eclipse.lsp4j.debug.launch.DSPLauncher.createClientLauncher(
-			    testClient,
-			    clientSocket.socket().getInputStream(),
-			    clientSocket.socket().getOutputStream()
-			);
-			launcher.startListening();
-			IDebugProtocolServer			server		= launcher.getRemoteProxy();
+	@ParameterizedTest
+	@NullSource
+	@ValueSource( ints = { -1, Integer.MAX_VALUE } )
+	void missingOrUnknownFramesFailExplicitly( Integer frameId ) throws Exception {
+		ExecutionException error = assertThrows( ExecutionException.class, () -> evaluate( frameId, "marker" ) );
+		assertEvaluationFailure( error, "frame" );
+		assertEquals( "\"callee\"", evaluate( frames[ 0 ].getId(), "marker" ).getResult() );
+		ContinueArguments resume = new ContinueArguments();
+		resume.setThreadId( threadId );
+		server.continue_( resume ).get( 5, TimeUnit.SECONDS );
+	}
 
-			InitializeRequestArguments		initArgs	= new InitializeRequestArguments();
-			CompletableFuture<Capabilities>	init		= server.initialize( initArgs );
-			assertNotNull( init.get( 5, TimeUnit.SECONDS ) );
+	@Test
+	void aResumedFrameCannotBeEvaluated() throws Exception {
+		ContinueArguments args = new ContinueArguments();
+		args.setThreadId( threadId );
+		server.continue_( args ).get( 5, TimeUnit.SECONDS );
+		ExecutionException error = assertThrows( ExecutionException.class, () -> evaluate( frames[ 0 ].getId(), "marker" ) );
+		assertEvaluationFailure( error, "frame" );
+	}
 
-			Map<String, Object> launchArgs = Map.of(
-			    "program", "src/test/resources/output.bxs"
-			);
-			server.launch( launchArgs ).get( 10, TimeUnit.SECONDS );
+	@ParameterizedTest
+	@ValueSource( strings = { "expiredFrame", "missingVariable" } )
+	void failedDumpDoesNotEmitSuccessAndSessionRemainsUsable( String failure ) throws Exception {
+		boolean				expired	= failure.equals( "expiredFrame" );
+		ExecutionException	error	= assertThrows( ExecutionException.class,
+		    () -> evaluate( expired ? -1 : frames[ 0 ].getId(),
+		        expired ? "writeDump(marker)" : "writeDump(nonexistentTicket01Variable)", "repl" ) );
+		assertEvaluationFailure( error, expired ? "frame" : "Dump produced no HTML" );
+		assertTrue( dumps.isEmpty(), "Failed dumps must not emit a success event" );
+		assertEquals( "\"callee\"", evaluate( frames[ 0 ].getId(), "marker" ).getResult() );
+		EvaluateResponse response = evaluate( frames[ 0 ].getId(), "writeDump(marker)", "repl" );
+		assertTrue( response.getResult().contains( "dumped" ) );
+		BoxLangDumpEventBody dump = dumps.poll( 5, TimeUnit.SECONDS );
+		assertNotNull( dump );
+		assertTrue( dump.getHtml().contains( "callee" ) );
+		assertTrue( dumps.isEmpty() );
+	}
 
-			EvaluateArguments evalArgs = new EvaluateArguments();
-			evalArgs.setContext( "hover" );
-			evalArgs.setExpression( "foo" );
+	private void assertEvaluationFailure( ExecutionException error, String detail ) {
+		ResponseError response = assertInstanceOf( ResponseErrorException.class, error.getCause() ).getResponseError();
+		assertTrue( response.getMessage().startsWith( "Unable to evaluate expression: " ), response.getMessage() );
+		assertTrue( response.getMessage().contains( detail ), response.getMessage() );
+	}
 
-			EvaluateResponse resp = server.evaluate( evalArgs ).get( 5, TimeUnit.SECONDS );
-			assertNotNull( resp );
-			assertTrue( resp.getResult() != null && resp.getResult().toLowerCase().contains( "error" ) );
-		}
+	private EvaluateResponse evaluate( Integer frameId, String expression ) throws Exception {
+		return evaluate( frameId, expression, "watch" );
+	}
+
+	private EvaluateResponse evaluate( Integer frameId, String expression, String context ) throws Exception {
+		EvaluateArguments args = new EvaluateArguments();
+		args.setFrameId( frameId );
+		args.setExpression( expression );
+		args.setContext( context );
+		return server.evaluate( args ).get( 10, TimeUnit.SECONDS );
+	}
+
+	private Variable[] variables( int reference ) throws Exception {
+		VariablesArguments args = new VariablesArguments();
+		args.setVariablesReference( reference );
+		return server.variables( args ).get( 10, TimeUnit.SECONDS ).getVariables();
 	}
 }
