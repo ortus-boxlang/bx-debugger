@@ -198,14 +198,14 @@ class EvaluateRequestHandlingTest {
 
 	@Test
 	void continueInvalidatesFramesAndVariableChildren() throws Exception {
-		int ref = evaluate( frames[ 0 ].getId(), "payload" ).getVariablesReference();
-		Variable[] children = variables( ref );
-		int childRef = Arrays.stream( children ).filter( v -> v.getVariablesReference() > 0 )
+		int				ref			= evaluate( frames[ 0 ].getId(), "payload" ).getVariablesReference();
+		Variable[]		children	= variables( ref );
+		int				childRef	= Arrays.stream( children ).filter( v -> v.getVariablesReference() > 0 )
 		    .findFirst().orElseThrow().getVariablesReference();
-		ScopesArguments scopes = new ScopesArguments();
+		ScopesArguments	scopes		= new ScopesArguments();
 		scopes.setFrameId( frames[ 0 ].getId() );
-		int scopeRef = server.scopes( scopes ).get( 10, TimeUnit.SECONDS ).getScopes()[ 0 ].getVariablesReference();
-		ContinueArguments resume = new ContinueArguments();
+		int					scopeRef	= server.scopes( scopes ).get( 10, TimeUnit.SECONDS ).getScopes()[ 0 ].getVariablesReference();
+		ContinueArguments	resume		= new ContinueArguments();
 		resume.setThreadId( threadId );
 		resume.setSingleThread( true );
 		server.continue_( resume ).get( 5, TimeUnit.SECONDS );

@@ -104,9 +104,9 @@ public class ScopesRequestHandlingTest {
 			ScopesArguments scopesArgs = new ScopesArguments();
 			scopesArgs.setFrameId( -1 ); // Invalid frame ID
 
-			ExecutionException error = assertThrows( ExecutionException.class,
+			ExecutionException		error		= assertThrows( ExecutionException.class,
 			    () -> server.scopes( scopesArgs ).get( 5, TimeUnit.SECONDS ) );
-			ResponseErrorException response = assertInstanceOf( ResponseErrorException.class, error.getCause() );
+			ResponseErrorException	response	= assertInstanceOf( ResponseErrorException.class, error.getCause() );
 			assertTrue( response.getMessage().contains( "Unable to read scopes" ) );
 			assertTrue( response.getMessage().contains( "stack frame" ) );
 			// An invalid reference must fail only the request, not disconnect the client.

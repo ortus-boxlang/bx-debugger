@@ -25,26 +25,26 @@ import com.sun.jdi.event.EventSet;
 
 public class BreakpointContext {
 
-	private static final Logger	LOGGER			= Logger.getLogger( BreakpointContext.class.getName() );
+	private static final Logger			LOGGER			= Logger.getLogger( BreakpointContext.class.getName() );
 
-	private static final AtomicInteger stackFrameId = new AtomicInteger();
+	private static final AtomicInteger	stackFrameId	= new AtomicInteger();
 
-	private int					breakpointId;
-	private ThreadReference		stoppedThread;
-	private VMController		vmController;
-	private ObjectReference		context;
-	private volatile List<FrameTuple> stackFrames;
-	private final VariableManager variables;
-	private volatile boolean active = true;
-	private final EventSet eventSet;
+	private int							breakpointId;
+	private ThreadReference				stoppedThread;
+	private VMController				vmController;
+	private ObjectReference				context;
+	private volatile List<FrameTuple>	stackFrames;
+	private final VariableManager		variables;
+	private volatile boolean			active			= true;
+	private final EventSet				eventSet;
 
 	public BreakpointContext( int breakpointId, ThreadReference stoppedThread, VMController vmController, EventSet eventSet ) {
 		this.breakpointId	= breakpointId;
 		this.stoppedThread	= stoppedThread;
 		this.vmController	= vmController;
 		this.stackFrames	= new ArrayList<>();
-		this.variables = new VariableManager( vmController );
-		this.eventSet = eventSet;
+		this.variables		= new VariableManager( vmController );
+		this.eventSet		= eventSet;
 
 		this.transformStackFrames();
 	}
@@ -91,8 +91,8 @@ public class BreakpointContext {
 	public void invalidate() {
 		active = false;
 		variables.clear();
-		stackFrames = List.of();
-		context = null;
+		stackFrames	= List.of();
+		context		= null;
 	}
 
 	EventSet getEventSet() {

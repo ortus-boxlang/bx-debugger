@@ -15,18 +15,25 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout( 60 )
 class ConcurrentStopIntegrationTest {
-	private final BoxDebugServer server = new BoxDebugServer();
-	private final LinkedBlockingQueue<StoppedEventArguments> stops = new LinkedBlockingQueue<>();
-	private final LinkedBlockingQueue<ContinuedEventArguments> continued = new LinkedBlockingQueue<>();
+
+	private final BoxDebugServer								server		= new BoxDebugServer();
+	private final LinkedBlockingQueue<StoppedEventArguments>	stops		= new LinkedBlockingQueue<>();
+	private final LinkedBlockingQueue<ContinuedEventArguments>	continued	= new LinkedBlockingQueue<>();
 
 	@Test
 	void independentWorkerStopsKeepTheirOwnVariablesThroughContinueAndStep() throws Exception {
 		server.setFalseExit( true );
 		server.connect( new IBoxLangDebugClient() {
+
 			@Override
-			public void stopped( StoppedEventArguments event ) { stops.add( event ); }
+			public void stopped( StoppedEventArguments event ) {
+				stops.add( event );
+			}
+
 			@Override
-			public void continued( ContinuedEventArguments event ) { continued.add( event ); }
+			public void continued( ContinuedEventArguments event ) {
+				continued.add( event );
+			}
 		} );
 		try {
 			assertEquals( true, server.initialize( new InitializeRequestArguments() ).get( 5, TimeUnit.SECONDS )
@@ -39,16 +46,16 @@ class ConcurrentStopIntegrationTest {
 			setBreakpoints( program.resolveSibling( "Ticket02Threads.cfc" ), 5 );
 			resume( bootstrap, false );
 			continued.clear();
-			int first = stoppedThread();
-			int second = stoppedThread();
+			int	first	= stoppedThread();
+			int	second	= stoppedThread();
 			assertNotEquals( first, second );
-			int firstFrame = frame( first );
-			int secondFrame = frame( second );
+			int	firstFrame	= frame( first );
+			int	secondFrame	= frame( second );
 			assertNotEquals( firstFrame, secondFrame );
-			int firstRef = evaluate( firstFrame, "payload" ).getVariablesReference();
-			int secondRef = evaluate( secondFrame, "payload" ).getVariablesReference();
-			String firstLabel = label( firstRef );
-			String secondLabel = label( secondRef );
+			int		firstRef	= evaluate( firstFrame, "payload" ).getVariablesReference();
+			int		secondRef	= evaluate( secondFrame, "payload" ).getVariablesReference();
+			String	firstLabel	= label( firstRef );
+			String	secondLabel	= label( secondRef );
 			assertNotEquals( firstLabel, secondLabel );
 
 			assertEquals( false, resume( first, true ).getAllThreadsContinued() );
@@ -100,25 +107,30 @@ class ConcurrentStopIntegrationTest {
 		SetBreakpointsArguments args = new SetBreakpointsArguments();
 		args.setSource( source );
 		args.setBreakpoints( Arrays.stream( lines ).mapToObj( line -> {
-			SourceBreakpoint bp = new SourceBreakpoint(); bp.setLine( line ); return bp;
+			SourceBreakpoint bp = new SourceBreakpoint();
+			bp.setLine( line );
+			return bp;
 		} ).toArray( SourceBreakpoint[]::new ) );
 		server.setBreakpoints( args ).get( 10, TimeUnit.SECONDS );
 	}
 
 	private ContinueResponse resume( int thread, boolean single ) throws Exception {
 		ContinueArguments args = new ContinueArguments();
-		args.setThreadId( thread ); args.setSingleThread( single );
+		args.setThreadId( thread );
+		args.setSingleThread( single );
 		return server.continue_( args ).get( 5, TimeUnit.SECONDS );
 	}
 
 	private EvaluateResponse evaluate( int frame, String expression ) throws Exception {
 		EvaluateArguments args = new EvaluateArguments();
-		args.setFrameId( frame ); args.setExpression( expression );
+		args.setFrameId( frame );
+		args.setExpression( expression );
 		return server.evaluate( args ).get( 10, TimeUnit.SECONDS );
 	}
 
 	private Variable[] variables( int reference ) throws Exception {
-		VariablesArguments args = new VariablesArguments(); args.setVariablesReference( reference );
+		VariablesArguments args = new VariablesArguments();
+		args.setVariablesReference( reference );
 		return server.variables( args ).get( 10, TimeUnit.SECONDS ).getVariables();
 	}
 

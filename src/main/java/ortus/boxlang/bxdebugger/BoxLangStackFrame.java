@@ -54,8 +54,8 @@ public class BoxLangStackFrame extends StackFrame {
 			setLine( javaFrame.getLine() );
 			setColumn( javaFrame.getColumn() );
 			if ( javaFrame.getSource() != null ) {
-				Source original = javaFrame.getSource();
-				Source source = new Source();
+				Source	original	= javaFrame.getSource();
+				Source	source		= new Source();
 				source.setName( original.getName() );
 				String path = original.getPath();
 				// JDI can prefix the generated package to an absolute SourceFile name.

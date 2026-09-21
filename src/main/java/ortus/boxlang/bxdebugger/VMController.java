@@ -86,11 +86,11 @@ public class VMController {
 	// DAP-level breakpoint storage - organized by file path
 	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile		= new ConcurrentHashMap<>();
 	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById			= new ConcurrentHashMap<>();
-	private final AtomicInteger breakpointIdCounter = new AtomicInteger();
+	private final AtomicInteger												breakpointIdCounter				= new AtomicInteger();
 
-	private final Map<Long, BreakpointContext> breakPointContexts = new ConcurrentHashMap<>();
+	private final Map<Long, BreakpointContext>								breakPointContexts				= new ConcurrentHashMap<>();
 	// Serializes stop publication/resume only; never hold this across expression evaluation.
-	private final Object stopLock = new Object();
+	private final Object													stopLock						= new Object();
 
 	private MethodEntryRequest												methodEntryRequest				= null;
 	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue			= new ConcurrentLinkedQueue<>();
@@ -524,10 +524,11 @@ public class VMController {
 
 	public void stepThread( int threadId, int depth, boolean singleThread ) {
 		synchronized ( stopLock ) {
-			BreakpointContext context = getBreakpointContextByThread( threadId )
+			BreakpointContext	context	= getBreakpointContextByThread( threadId )
 			    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) );
-			StepRequest old = stepRequests.remove( ( long ) threadId );
-			if ( old != null ) vm.eventRequestManager().deleteEventRequest( old );
+			StepRequest			old		= stepRequests.remove( ( long ) threadId );
+			if ( old != null )
+				vm.eventRequestManager().deleteEventRequest( old );
 			StepRequest request = vm.eventRequestManager().createStepRequest( context.getThreadReference(), StepRequest.STEP_LINE, depth );
 			request.addClassFilter( "boxgenerated.*" );
 			request.addCountFilter( 1 );
@@ -1388,24 +1389,27 @@ public class VMController {
 					continue; // Timeout, check if we should continue
 				}
 
-				EventIterator eventIterator = eventSet.eventIterator();
-				boolean stopHandled = false;
+				EventIterator	eventIterator	= eventSet.eventIterator();
+				boolean			stopHandled		= false;
 
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
 
 					if ( event instanceof BreakpointEvent be ) {
-						if ( !stopHandled ) handleBreakpointEvent( be, eventSet );
+						if ( !stopHandled )
+							handleBreakpointEvent( be, eventSet );
 						stopHandled = true;
 					} else if ( event instanceof StepEvent se ) {
-						if ( !stopHandled ) handleStepEvent( se, eventSet );
+						if ( !stopHandled )
+							handleStepEvent( se, eventSet );
 						stopHandled = true;
 					} else if ( event instanceof ClassPrepareEvent cpe ) {
 						handleClassPrepareEvent( cpe );
 					} else if ( event instanceof MethodEntryEvent mee ) {
 						handleMethodEntryEvent( mee );
 					} else if ( event instanceof ExceptionEvent ee ) {
-						if ( !stopHandled ) handleExceptionEvent( ee, eventSet );
+						if ( !stopHandled )
+							handleExceptionEvent( ee, eventSet );
 						stopHandled = true;
 					} else if ( event instanceof VMStartEvent ) {
 						synchronized ( stopLock ) {
@@ -1619,9 +1623,10 @@ public class VMController {
 			breakpointHitCounts.put( breakpointId, hitCount );
 
 			// Track context for expression evaluation (needed before condition check)
-			int contextId = generateBreakpointId();
-			BreakpointContext context = trackBreakpointContext( contextId, event.thread(), eventSet );
-			if ( context == null ) return;
+			int					contextId	= generateBreakpointId();
+			BreakpointContext	context		= trackBreakpointContext( contextId, event.thread(), eventSet );
+			if ( context == null )
+				return;
 
 			// Check hit condition if specified
 			if ( hitCondition != null && !hitCondition.isEmpty() ) {
@@ -1934,7 +1939,8 @@ public class VMController {
 			LOGGER.info( "Step completed at " + sourceName + ":" + lineNumber );
 
 			BreakpointContext context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
-			if ( context == null ) return;
+			if ( context == null )
+				return;
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -1970,10 +1976,10 @@ public class VMController {
 			LOGGER.info( "Exception hit: " + exceptionType + " at " + sourceName + ":" + lineNumber + " (caught=" + isCaught + ")" );
 
 			// Extract exception message if possible
-			String			exceptionMessage	= extractExceptionMessage( exceptionObj );
+			String				exceptionMessage	= extractExceptionMessage( exceptionObj );
 
 			// Store exception info for this thread
-			ExceptionInfo	exceptionInfo		= new ExceptionInfo(
+			ExceptionInfo		exceptionInfo		= new ExceptionInfo(
 			    exceptionType,
 			    exceptionMessage != null ? exceptionMessage : exceptionType,
 			    breakMode,
@@ -1981,10 +1987,11 @@ public class VMController {
 			    exceptionMessage
 			);
 			// Track the breakpoint context and exception together before publishing the stop.
-			BreakpointContext context;
+			BreakpointContext	context;
 			synchronized ( stopLock ) {
 				context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
-				if ( context == null ) return;
+				if ( context == null )
+					return;
 				exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
 			}
 
@@ -2049,10 +2056,12 @@ public class VMController {
 				return null;
 			}
 			StepRequest step = stepRequests.remove( thread.uniqueID() );
-			if ( step != null ) vm.eventRequestManager().deleteEventRequest( step );
-			BreakpointContext context = new BreakpointContext( breakpointId, thread, this, eventSet );
-			BreakpointContext old = breakPointContexts.put( thread.uniqueID(), context );
-			if ( old != null ) old.invalidate();
+			if ( step != null )
+				vm.eventRequestManager().deleteEventRequest( step );
+			BreakpointContext	context	= new BreakpointContext( breakpointId, thread, this, eventSet );
+			BreakpointContext	old		= breakPointContexts.put( thread.uniqueID(), context );
+			if ( old != null )
+				old.invalidate();
 			exceptionInfoByThread.remove( thread.uniqueID() );
 			return context;
 		}
@@ -2111,7 +2120,8 @@ public class VMController {
 				client.continued( event );
 			}
 		} finally {
-			for ( BreakpointContext context : contexts ) context.getEventSet().resume();
+			for ( BreakpointContext context : contexts )
+				context.getEventSet().resume();
 		}
 		return allContinued;
 	}

@@ -12,12 +12,13 @@ import com.sun.jdi.ObjectReference;
 import org.junit.jupiter.api.Test;
 
 class VariableHandleLifetimeTest {
+
 	@Test
 	void parallelAllocationsAcrossStopsHaveUniqueReferences() {
-		VariableManager first = new VariableManager( new VMController( null, null ) );
-		VariableManager second = new VariableManager( new VMController( null, null ) );
-		ObjectReference value = mock( ObjectReference.class );
-		int[] ids = IntStream.range( 0, 1000 ).parallel()
+		VariableManager	first	= new VariableManager( new VMController( null, null ) );
+		VariableManager	second	= new VariableManager( new VMController( null, null ) );
+		ObjectReference	value	= mock( ObjectReference.class );
+		int[]			ids		= IntStream.range( 0, 1000 ).parallel()
 		    .map( i -> ( i % 2 == 0 ? first : second ).put( value, "value" ) ).toArray();
 		assertEquals( ids.length, IntStream.of( ids ).distinct().count() );
 		for ( int i = 0; i < ids.length; i++ ) {
@@ -30,16 +31,16 @@ class VariableHandleLifetimeTest {
 
 	@Test
 	void handlesSurviveGarbageCollectionUntilExplicitlyCleared() throws Exception {
-		VariableManager variables = new VariableManager( new VMController( null, null ) );
-		ObjectReference value = mock( ObjectReference.class );
-		ClassType type = mock( ClassType.class );
+		VariableManager	variables	= new VariableManager( new VMController( null, null ) );
+		ObjectReference	value		= mock( ObjectReference.class );
+		ClassType		type		= mock( ClassType.class );
 		when( value.type() ).thenReturn( type );
 		when( type.name() ).thenReturn( "example.Object" );
 		when( type.allInterfaces() ).thenReturn( List.of() );
 		when( value.referenceType() ).thenReturn( type );
 		when( type.allFields() ).thenReturn( List.of() );
-		int[] ids = IntStream.range( 0, 256 ).map( i -> variables.put( value, "value" ) ).toArray();
-		WeakReference<Object> sentinel = new WeakReference<>( new Object() );
+		int[]					ids			= IntStream.range( 0, 256 ).map( i -> variables.put( value, "value" ) ).toArray();
+		WeakReference<Object>	sentinel	= new WeakReference<>( new Object() );
 		for ( int i = 0; i < 50 && sentinel.get() != null; i++ ) {
 			System.gc();
 			Thread.sleep( 10 );

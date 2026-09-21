@@ -28,12 +28,12 @@ import ortus.boxlang.runtime.dynamic.casters.StringCaster;
 
 public class VariableManager {
 
-	private static final Logger				LOGGER			= Logger.getLogger( VariableManager.class.getName() );
-	private static final AtomicInteger variableIds = new AtomicInteger();
-	private VMController					vmController;
-	private Map<Integer, Value> variables = new ConcurrentHashMap<>();
-	private Map<Integer, String> evaluateNames = new ConcurrentHashMap<>();
-	private volatile boolean expired;
+	private static final Logger			LOGGER			= Logger.getLogger( VariableManager.class.getName() );
+	private static final AtomicInteger	variableIds		= new AtomicInteger();
+	private VMController				vmController;
+	private Map<Integer, Value>			variables		= new ConcurrentHashMap<>();
+	private Map<Integer, String>		evaluateNames	= new ConcurrentHashMap<>();
+	private volatile boolean			expired;
 
 	public VariableManager( VMController vmController ) {
 		this.vmController = vmController;
@@ -73,9 +73,9 @@ public class VariableManager {
 		if ( variable == null ) {
 			throw new IllegalArgumentException( "Unknown or expired variables reference " + id );
 		}
-		String parentEvaluateName = evaluateNames.getOrDefault( id, "" );
+		String			parentEvaluateName	= evaluateNames.getOrDefault( id, "" );
 
-		List<Variable> result = List.of();
+		List<Variable>	result				= List.of();
 		if ( isStruct( variable ) ) {
 			result = gerVariablesFromStruct( ( ObjectReference ) variable, parentEvaluateName );
 		} else if ( isArray( variable ) ) {

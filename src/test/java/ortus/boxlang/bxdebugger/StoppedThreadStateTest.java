@@ -26,15 +26,17 @@ import com.sun.jdi.request.StepRequest;
 
 @Timeout( 10 )
 class StoppedThreadStateTest {
-	private final VirtualMachine vm = mock( VirtualMachine.class, RETURNS_DEEP_STUBS );
-	private final LinkedBlockingQueue<EventSet> events = new LinkedBlockingQueue<>();
-	private final LinkedBlockingQueue<StoppedEventArguments> stops = new LinkedBlockingQueue<>();
-	private VMController controller;
-	private final LinkedBlockingQueue<ContinuedEventArguments> continued = new LinkedBlockingQueue<>();
+
+	private final VirtualMachine								vm			= mock( VirtualMachine.class, RETURNS_DEEP_STUBS );
+	private final LinkedBlockingQueue<EventSet>					events		= new LinkedBlockingQueue<>();
+	private final LinkedBlockingQueue<StoppedEventArguments>	stops		= new LinkedBlockingQueue<>();
+	private VMController										controller;
+	private final LinkedBlockingQueue<ContinuedEventArguments>	continued	= new LinkedBlockingQueue<>();
 
 	@AfterEach
 	void cleanup() {
-		if ( controller != null ) controller.stopEventProcessing();
+		if ( controller != null )
+			controller.stopEventProcessing();
 	}
 
 	private void start( IBoxLangDebugClient client ) throws Exception {
@@ -65,7 +67,7 @@ class StoppedThreadStateTest {
 		when( event.location() ).thenReturn( location );
 		BreakpointRequest request = mock( BreakpointRequest.class );
 		when( event.request() ).thenReturn( request );
-		when( request.getProperty( "breakPointId" ) ).thenReturn( (int) id );
+		when( request.getProperty( "breakPointId" ) ).thenReturn( ( int ) id );
 		when( request.getProperty( "hitCondition" ) ).thenReturn( hitCondition );
 		return eventSet( event );
 	}
@@ -83,30 +85,36 @@ class StoppedThreadStateTest {
 
 	private void start() throws Exception {
 		start( new IBoxLangDebugClient() {
+
 			@Override
-			public void stopped( StoppedEventArguments event ) { stops.add( event ); }
+			public void stopped( StoppedEventArguments event ) {
+				stops.add( event );
+			}
+
 			@Override
-			public void continued( ContinuedEventArguments event ) { continued.add( event ); }
+			public void continued( ContinuedEventArguments event ) {
+				continued.add( event );
+			}
 		} );
 	}
 
 	@Test
 	void independentStopsRetainHandlesAndContinueAllReleasesTheRemainder() throws Exception {
 		start();
-		EventSet first = breakpoint( 201 );
-		EventSet second = breakpoint( 202 );
+		EventSet	first	= breakpoint( 201 );
+		EventSet	second	= breakpoint( 202 );
 		events.add( first );
 		events.add( second );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
-		BreakpointContext a = controller.getBreakpointContextByThread( 201 ).orElseThrow();
-		BreakpointContext b = controller.getBreakpointContextByThread( 202 ).orElseThrow();
-		int aFrame = a.getStackFrames().getFirst().getId();
-		int bFrame = b.getStackFrames().getFirst().getId();
+		BreakpointContext	a		= controller.getBreakpointContextByThread( 201 ).orElseThrow();
+		BreakpointContext	b		= controller.getBreakpointContextByThread( 202 ).orElseThrow();
+		int					aFrame	= a.getStackFrames().getFirst().getId();
+		int					bFrame	= b.getStackFrames().getFirst().getId();
 		assertNotEquals( aFrame, bFrame );
-		ObjectReference value = mock( ObjectReference.class );
-		int aRef = a.getVariables().put( value );
-		int bRef = b.getVariables().put( value );
+		ObjectReference	value	= mock( ObjectReference.class );
+		int				aRef	= a.getVariables().put( value );
+		int				bRef	= b.getVariables().put( value );
 		assertNotEquals( aRef, bRef );
 		a.resume();
 		assertThrows( IllegalArgumentException.class, () -> controller.getVariables( aRef ) );
@@ -133,18 +141,18 @@ class StoppedThreadStateTest {
 		start();
 		events.add( first );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
-		BreakpointContext old = controller.getBreakpointContextByThread( 201 ).orElseThrow();
-		int frameId = old.getStackFrames().getFirst().getId();
-		int ref = old.getVariables().put( mock( ObjectReference.class ) );
-		ThreadReference thread = old.getThreadReference();
-		StepRequest request = mock( StepRequest.class );
+		BreakpointContext	old		= controller.getBreakpointContextByThread( 201 ).orElseThrow();
+		int					frameId	= old.getStackFrames().getFirst().getId();
+		int					ref		= old.getVariables().put( mock( ObjectReference.class ) );
+		ThreadReference		thread	= old.getThreadReference();
+		StepRequest			request	= mock( StepRequest.class );
 		when( vm.eventRequestManager().createStepRequest( thread, StepRequest.STEP_LINE, depth ) ).thenReturn( request );
 		controller.stepThread( 201, depth, true );
 		verify( first ).resume();
 		assertThrows( IllegalArgumentException.class, () -> controller.getVariables( ref ) );
 		assertTrue( controller.getBreakpointContextbyStackFrame( frameId ).isEmpty() );
-		StepEvent event = mock( StepEvent.class );
-		Location location = thread.frames().getFirst().location();
+		StepEvent	event		= mock( StepEvent.class );
+		Location	location	= thread.frames().getFirst().location();
 		when( event.thread() ).thenReturn( thread );
 		when( event.location() ).thenReturn( location );
 		EventSet next = eventSet( event );
@@ -162,9 +170,12 @@ class StoppedThreadStateTest {
 
 	@Test
 	void skippedHitResumesWithoutPublishingStopOrContinueEvents() throws Exception {
-		EventSet set = breakpoint( 201, "2" );
-		CountDownLatch resumed = new CountDownLatch( 1 );
-		doAnswer( call -> { resumed.countDown(); return null; } ).when( set ).resume();
+		EventSet		set		= breakpoint( 201, "2" );
+		CountDownLatch	resumed	= new CountDownLatch( 1 );
+		doAnswer( call -> {
+			resumed.countDown();
+			return null;
+		} ).when( set ).resume();
 		start();
 		events.add( set );
 		assertTrue( resumed.await( 3, TimeUnit.SECONDS ) );
@@ -178,8 +189,8 @@ class StoppedThreadStateTest {
 	void repeatedStopsSurviveGcAndCleanupExpiresEveryHandle() throws Exception {
 		EventSet set = breakpoint( 201 );
 		start();
-		int oldFrame = -1;
-		int oldRef = -1;
+		int	oldFrame	= -1;
+		int	oldRef		= -1;
 		for ( int i = 0; i < 160; i++ ) {
 			events.add( set );
 			assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
@@ -187,12 +198,16 @@ class StoppedThreadStateTest {
 			assertTrue( controller.getBreakpointContextbyStackFrame( oldFrame ).isEmpty() );
 			int expired = oldRef;
 			assertThrows( IllegalArgumentException.class, () -> controller.getVariables( expired ) );
-			oldFrame = context.getStackFrames().getFirst().getId();
-			oldRef = context.getVariables().put( mock( ObjectReference.class ) );
-			if ( i < 159 ) context.resume();
+			oldFrame	= context.getStackFrames().getFirst().getId();
+			oldRef		= context.getVariables().put( mock( ObjectReference.class ) );
+			if ( i < 159 )
+				context.resume();
 		}
 		WeakReference<Object> sentinel = new WeakReference<>( new Object() );
-		for ( int i = 0; i < 50 && sentinel.get() != null; i++ ) { System.gc(); Thread.sleep( 10 ); }
+		for ( int i = 0; i < 50 && sentinel.get() != null; i++ ) {
+			System.gc();
+			Thread.sleep( 10 );
+		}
 		assertNull( sentinel.get() );
 		assertTrue( controller.getBreakpointContextbyStackFrame( oldFrame ).isPresent() );
 		VariableManager variables = controller.getVariables( oldRef );
@@ -209,11 +224,11 @@ class StoppedThreadStateTest {
 
 	@Test
 	void exceptionDetailsExpireOnResumeAndOnCleanup() throws Exception {
-		EventSet seed = breakpoint( 201 );
-		BreakpointEvent breakpoint = (BreakpointEvent) seed.eventIterator().nextEvent();
-		ThreadReference thread = breakpoint.thread();
-		Location location = breakpoint.location();
-		ExceptionEvent exception = mock( ExceptionEvent.class );
+		EventSet		seed		= breakpoint( 201 );
+		BreakpointEvent	breakpoint	= ( BreakpointEvent ) seed.eventIterator().nextEvent();
+		ThreadReference	thread		= breakpoint.thread();
+		Location		location	= breakpoint.location();
+		ExceptionEvent	exception	= mock( ExceptionEvent.class );
 		when( exception.thread() ).thenReturn( thread );
 		when( exception.location() ).thenReturn( location );
 		ObjectReference thrown = mock( ObjectReference.class, RETURNS_DEEP_STUBS );
@@ -236,29 +251,34 @@ class StoppedThreadStateTest {
 
 	@Test
 	void steppingAllThreadsReleasesOtherStopsAndCleanupDeletesPendingStepRequests() throws Exception {
-		EventSet first = breakpoint( 201 );
-		EventSet second = breakpoint( 202 );
+		EventSet	first	= breakpoint( 201 );
+		EventSet	second	= breakpoint( 202 );
 		start();
-		events.add( first ); events.add( second );
+		events.add( first );
+		events.add( second );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
-		BreakpointContext context = controller.getBreakpointContextByThread( 201 ).orElseThrow();
-		StepRequest request = mock( StepRequest.class );
-		ThreadReference thread = context.getThreadReference();
+		BreakpointContext	context	= controller.getBreakpointContextByThread( 201 ).orElseThrow();
+		StepRequest			request	= mock( StepRequest.class );
+		ThreadReference		thread	= context.getThreadReference();
 		when( vm.eventRequestManager().createStepRequest( thread, StepRequest.STEP_LINE, StepRequest.STEP_OVER ) ).thenReturn( request );
 		controller.stepThread( 201, StepRequest.STEP_OVER, false );
 		assertEquals( true, continued.poll( 1, TimeUnit.SECONDS ).getAllThreadsContinued() );
 		assertTrue( controller.getBreakpointContextByThread( 202 ).isEmpty() );
-		verify( first ).resume(); verify( second ).resume();
+		verify( first ).resume();
+		verify( second ).resume();
 		controller.stopEventProcessing();
 		verify( vm.eventRequestManager() ).deleteEventRequest( request );
 	}
 
 	@Test
 	void repeatedConfigurationDoneDoesNotResumeAnUnrelatedStop() throws Exception {
-		EventSet start = eventSet( mock( VMStartEvent.class ) );
-		CountDownLatch resumed = new CountDownLatch( 1 );
-		doAnswer( call -> { resumed.countDown(); return null; } ).when( start ).resume();
+		EventSet		start	= eventSet( mock( VMStartEvent.class ) );
+		CountDownLatch	resumed	= new CountDownLatch( 1 );
+		doAnswer( call -> {
+			resumed.countDown();
+			return null;
+		} ).when( start ).resume();
 		start();
 		events.add( start );
 		controller.signalConfigurationDone();
@@ -276,10 +296,16 @@ class StoppedThreadStateTest {
 	void notificationFailureCannotStrandAResumedStop() throws Exception {
 		EventSet set = breakpoint( 201 );
 		start( new IBoxLangDebugClient() {
+
 			@Override
-			public void stopped( StoppedEventArguments event ) { stops.add( event ); }
+			public void stopped( StoppedEventArguments event ) {
+				stops.add( event );
+			}
+
 			@Override
-			public void continued( ContinuedEventArguments event ) { throw new IllegalStateException( "Client disconnected" ); }
+			public void continued( ContinuedEventArguments event ) {
+				throw new IllegalStateException( "Client disconnected" );
+			}
 		} );
 		events.add( set );
 		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ) );
@@ -291,9 +317,10 @@ class StoppedThreadStateTest {
 
 	@Test
 	void immediateContinueConsumesTheStopEventSetExactlyOnce() throws Exception {
-		EventSet set = breakpoint( 201 );
-		AtomicReference<Throwable> failure = new AtomicReference<>();
+		EventSet					set		= breakpoint( 201 );
+		AtomicReference<Throwable>	failure	= new AtomicReference<>();
 		start( new IBoxLangDebugClient() {
+
 			@Override
 			public void stopped( StoppedEventArguments event ) {
 				try {
