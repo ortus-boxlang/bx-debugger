@@ -174,7 +174,7 @@ public class BoxLangStackFrame extends StackFrame {
 		return boxFrame;
 	}
 
-	private static boolean isAbsoluteSourcePath( String path ) {
+	static boolean isAbsoluteSourcePath( String path ) {
 		if ( path == null ) {
 			return false;
 		}

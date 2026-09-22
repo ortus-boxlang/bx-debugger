@@ -187,6 +187,10 @@ public class FullDebugSessionTest {
 				Scope requestScope = DebugServerTestUtils.findScope( scopesResult, "request" );
 				assertThat( requestScope ).isNotNull();
 
+				// The script breakpoint is a one-shot bootstrap; the line may have multiple locations.
+				breakpointArgs.setBreakpoints( new SourceBreakpoint[] { functionBreakpoint } );
+				server.setBreakpoints( breakpointArgs ).get( TIMEOUT, TimeUnit.SECONDS );
+
 				// CONTINUE
 				ContinueArguments continueArgs = new ContinueArguments();
 				continueArgs.setThreadId( stopped.get().getThreadId() );

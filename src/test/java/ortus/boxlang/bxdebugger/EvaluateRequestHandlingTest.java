@@ -97,6 +97,9 @@ class EvaluateRequestHandlingTest {
 		server.configurationDone( new ConfigurationDoneArguments() ).get( 10, TimeUnit.SECONDS );
 		StoppedEventArguments stop = stops.poll( 15, TimeUnit.SECONDS );
 		assertNotNull( stop, "Expected the bootstrap stop after loading the CFC" );
+		// The bootstrap stop is one-shot, even if its line has multiple executable locations.
+		breakpoints.setBreakpoints( new SourceBreakpoint[ 0 ] );
+		server.setBreakpoints( breakpoints ).get( 10, TimeUnit.SECONDS );
 		// Bind after class loading to isolate these tests from class-prepare races (ticket 03).
 		source.setPath( workspace.resolve( "Ticket01Frames.cfc" ).toString() );
 		SourceBreakpoint cfcBreakpoint = new SourceBreakpoint();
@@ -217,7 +220,8 @@ class EvaluateRequestHandlingTest {
 		assertThrows( ExecutionException.class, () -> server.scopes( scopes ).get( 5, TimeUnit.SECONDS ) );
 		StackTraceArguments stack = new StackTraceArguments();
 		stack.setThreadId( threadId );
-		assertEquals( 0, server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames().length );
+		assertTrue( Arrays.stream( server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames() )
+		    .noneMatch( frame -> frame.getId() == frames[ 0 ].getId() ), "A subsequent stop must not reuse the resumed frame" );
 	}
 
 	@ParameterizedTest

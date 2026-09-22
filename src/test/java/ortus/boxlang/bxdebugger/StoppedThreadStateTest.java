@@ -99,6 +99,32 @@ class StoppedThreadStateTest {
 	}
 
 	@Test
+	void reverifyingBindingsDoesNotResetTheLogicalHitCount() throws Exception {
+		start();
+		ReferenceType type = mock( ReferenceType.class );
+		when( type.name() ).thenReturn( "boxgenerated.Test" );
+		Location location = mock( Location.class );
+		when( location.sourcePath() ).thenReturn( "/app/test.bxs" );
+		when( location.sourceName() ).thenReturn( "test.bxs" );
+		when( type.locationsOfLine( 10 ) ).thenReturn( List.of( location ) );
+		when( vm.allClasses() ).thenReturn( List.of( type ) );
+		var source = new org.eclipse.lsp4j.debug.Source();
+		source.setPath( "/app/test.bxs" );
+		var line = new org.eclipse.lsp4j.debug.SourceBreakpoint();
+		line.setLine( 10 );
+		line.setHitCondition( "2" );
+		var breakpoint = controller.trackSourceBreakpoint( source, line );
+		controller.verifyAndSetPendingBreakpoints();
+		EventSet first = breakpoint( breakpoint.getId(), "2" );
+		events.add( first );
+		verify( first, timeout( 3000 ) ).resume();
+		assertTrue( stops.isEmpty() );
+		controller.verifyAndSetPendingBreakpoints();
+		events.add( breakpoint( breakpoint.getId(), "2" ) );
+		assertNotNull( stops.poll( 3, TimeUnit.SECONDS ), "Second hit must stop even after re-verification" );
+	}
+
+	@Test
 	void independentStopsRetainHandlesAndContinueAllReleasesTheRemainder() throws Exception {
 		start();
 		EventSet	first	= breakpoint( 201 );

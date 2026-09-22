@@ -463,7 +463,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 	@Override
 	public CompletableFuture<SetBreakpointsResponse> setBreakpoints( SetBreakpointsArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
+		// Apply replacements at receipt so deferred tasks cannot reorder requests for the same source.
+		return CompletableFuture.completedFuture( null ).thenApply( ignored -> {
 			SetBreakpointsResponse	response			= new SetBreakpointsResponse();
 			List<Breakpoint>		responseBreakpoints	= new ArrayList<>();
 
@@ -495,29 +496,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				remoteSource.setSourceReference( args.getSource().getSourceReference() );
 			}
 
-			// Clear existing pending breakpoints for this file first
-			// (setBreakpoints replaces all breakpoints for the file)
-			if ( remotePath != null ) {
-				vmController.clearPendingBreakpointsForFile( remotePath );
-				// Also clear using local path in case there are any stored with the original path
-				if ( !remotePath.equals( localPath ) ) {
-					vmController.clearPendingBreakpointsForFile( localPath );
-				}
+			vmController.setPathMappingService( pathMappingService );
+			for ( Breakpoint breakpoint : vmController.replaceSourceBreakpoints( remoteSource, args.getBreakpoints() ) ) {
+				breakpoint.getSource().setPath( localPath );
+				responseBreakpoints.add( breakpoint );
 			}
-
-			if ( args.getBreakpoints() != null ) {
-				for ( SourceBreakpoint sourceBreakpoint : args.getBreakpoints() ) {
-					// Use the encapsulated method to track the breakpoint with remote path
-					Breakpoint breakpoint = vmController.trackSourceBreakpoint( remoteSource, sourceBreakpoint );
-					// Update the response breakpoint to show the local path to the client
-					if ( breakpoint.getSource() != null && localPath != null ) {
-						breakpoint.getSource().setPath( localPath );
-					}
-					responseBreakpoints.add( breakpoint );
-				}
-			}
-
-			verifyAndSetPendingBreakpoints();
 
 			response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
 

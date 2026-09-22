@@ -3,6 +3,9 @@ package ortus.boxlang.bxdebugger;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeoutException;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.sun.jdi.ArrayReference;
@@ -21,21 +24,20 @@ import com.sun.jdi.Value;
 
 public class InvokeTools {
 
-	private static final Logger							LOGGER		= Logger.getLogger( VariableManager.class.getName() );
+	private static final Logger							LOGGER		= Logger.getLogger( InvokeTools.class.getName() );
 	public static CompletableFuture<ThreadReference>	debugThread	= new CompletableFuture<>();
 
 	private static final Object							invokeLock	= new Object();
 
 	/**
-	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
+	 * Fail the invocation when DebuggerUtil is unavailable without terminating the adapter.
 	 *
 	 * @param message The error message to log
 	 */
 	private static void fatalError( String message ) {
 		LOGGER.severe( "FATAL: " + message );
 		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
-		System.exit( 1 );
+		throw new IllegalStateException( message );
 	}
 
 	public static ObjectReference createIntegerRef( VMController vmController, int value ) {
@@ -62,10 +64,7 @@ public class InvokeTools {
 				    ObjectReference.INVOKE_SINGLE_THREADED
 				);
 			} catch ( Exception e ) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-
-				return null;
+				throw new CompletionException( e );
 			}
 			// boxedInt is an ObjectReference (java.lang.Integer) on success
 			return ( ObjectReference ) boxedInt;
@@ -80,15 +79,13 @@ public class InvokeTools {
 				try {
 					String taskId = enqueueStatic( vmController, target, methodName, paramTypeNames, args );
 					if ( taskId == null ) {
-						LOGGER.severe( "Failed to enqueue static invocation: " + target + "." + methodName );
-						return null;
+						throw new IllegalStateException( "Failed to enqueue static invocation: " + target + "." + methodName );
 					}
 					return pollForResult( vmController, taskId );
 				} catch ( Exception e ) {
-					LOGGER.severe( "Error during submitAndInvokeStatic: " + e.getMessage() );
+					LOGGER.log( Level.SEVERE, "Error during submitAndInvokeStatic: " + target + "." + methodName, e );
+					throw e instanceof CompletionException completion ? completion : new CompletionException( e );
 				}
-
-				return null;
 			}
 		} );
 	}
@@ -101,15 +98,13 @@ public class InvokeTools {
 				try {
 					String taskId = enqueueOnObject( vmController, target, methodName, paramTypeNames, args );
 					if ( taskId == null ) {
-						LOGGER.severe( "Failed to enqueue invocation: " + methodName );
-						return null;
+						throw new IllegalStateException( "Failed to enqueue invocation: " + methodName );
 					}
 					return pollForResult( vmController, taskId );
 				} catch ( Exception e ) {
-					LOGGER.severe( "Error during submitAndInvoke: " + e.getMessage() );
+					LOGGER.log( Level.SEVERE, "Error during submitAndInvoke: " + methodName, e );
+					throw e instanceof CompletionException completion ? completion : new CompletionException( e );
 				}
-
-				return null;
 			}
 		} );
 	}
@@ -141,19 +136,13 @@ public class InvokeTools {
 				}
 				Thread.sleep( 50 );
 			}
-			LOGGER.warning( "pollForResult timed out after " + ( timeoutLoop * 50 ) + "ms for taskId: " + taskId );
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during pollForResult: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during pollForResult: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during pollForResult: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during pollForResult: " + e.getMessage() );
+			throw new CompletionException( new TimeoutException( "pollForResult timed out after " + ( timeoutLoop * 50 ) + "ms for taskId: " + taskId ) );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		} catch ( InterruptedException e ) {
-			LOGGER.severe( "Interrupted during pollForResult: " + e.getMessage() );
+			Thread.currentThread().interrupt();
+			throw new CompletionException( e );
 		}
-		return null;
 	}
 
 	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
@@ -182,17 +171,9 @@ public class InvokeTools {
 			);
 
 			return ( ( StringReference ) taskIdVal ).value();
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during enqueueStatic: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during enqueueStatic: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during enqueueStatic: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during enqueueStatic: " + e.getMessage() );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		}
-
-		return null;
 	}
 
 	private static String enqueueOnObject( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
@@ -221,17 +202,9 @@ public class InvokeTools {
 			);
 
 			return ( ( StringReference ) taskIdVal ).value();
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during enqueueOnObject: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during enqueueOnObject: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during enqueueOnObject: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during enqueueOnObject: " + e.getMessage() );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		}
-
-		return null;
 	}
 
 	private static ArrayReference convertToMirrorStringArray( VMController vmController, List<String> strings ) {
@@ -240,10 +213,8 @@ public class InvokeTools {
 		for ( int i = 0; i < strings.size(); ++i ) {
 			try {
 				typeArray.setValue( i, vmController.vm.mirrorOf( strings.get( i ) ) );
-			} catch ( InvalidTypeException e ) {
-				LOGGER.severe( "Invalid type when converting to Value[]: " + e.getMessage() );
-			} catch ( ClassNotLoadedException e ) {
-				LOGGER.severe( "Class not loaded when converting to Value[]: " + e.getMessage() );
+			} catch ( InvalidTypeException | ClassNotLoadedException e ) {
+				throw new CompletionException( e );
 			}
 		}
 
@@ -256,10 +227,8 @@ public class InvokeTools {
 		for ( int i = 0; i < things.size(); ++i ) {
 			try {
 				typeArray.setValue( i, things.get( i ) );
-			} catch ( InvalidTypeException e ) {
-				LOGGER.severe( "Invalid type when converting to Object[]: " + e.getMessage() );
-			} catch ( ClassNotLoadedException e ) {
-				LOGGER.severe( "Class not loaded when converting to Object[]: " + e.getMessage() );
+			} catch ( InvalidTypeException | ClassNotLoadedException e ) {
+				throw new CompletionException( e );
 			}
 		}
 

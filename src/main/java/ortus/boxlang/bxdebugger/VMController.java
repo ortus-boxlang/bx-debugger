@@ -78,8 +78,10 @@ public class VMController {
 
 	public final VirtualMachine												vm;
 	private final IDebugProtocolClient										client;
+	// ponytail: retain generated-class mirrors for this session; evict unloaded mirrors if reload volume warrants it.
+	private final java.util.Set<ReferenceType>								breakpointClasses				= new java.util.HashSet<>();
+	private boolean															breakpointClassesDiscovered;
 	private final List<BreakpointRequest>									activeBreakpoints				= new CopyOnWriteArrayList<>();
-	private final List<PendingBreakpointInfo>								pendingBreakpoints				= new CopyOnWriteArrayList<>();
 	private volatile boolean												eventProcessingActive			= false;
 	private Thread															eventProcessingThread;
 
@@ -127,8 +129,8 @@ public class VMController {
 	// Path mapping service for remote debugging support
 	private PathMappingService												pathMappingService				= null;
 
-	// Verified breakpoints storage - keeps track of breakpoints that have been successfully set
-	// This allows re-applying breakpoints when BoxLang recompiles a class
+	// Retained logical definitions, including unresolved requests, for class preparation/recompilation.
+	// Client-visible verification comes from actual active JDI bindings, not membership in this map.
 	private final Map<Integer, VerifiedBreakpointInfo>						verifiedBreakpoints				= new ConcurrentHashMap<>();
 
 	// Flag to track whether configurationDone has been called
@@ -301,32 +303,6 @@ public class VMController {
 		}
 	}
 
-	/**
-	 * Information about a breakpoint that couldn't be set yet because the class isn't loaded
-	 */
-	private static class PendingBreakpointInfo {
-
-		final String	filePath;
-		final int		lineNumber;
-		final int		breakpointId;
-		final String	condition;
-		final String	hitCondition;
-		final String	logMessage;
-
-		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId ) {
-			this( filePath, lineNumber, breakpointId, null, null, null );
-		}
-
-		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId, String condition, String hitCondition, String logMessage ) {
-			this.filePath		= filePath;
-			this.lineNumber		= lineNumber;
-			this.breakpointId	= breakpointId;
-			this.condition		= condition;
-			this.hitCondition	= hitCondition;
-			this.logMessage		= logMessage;
-		}
-	}
-
 	public VMController( VirtualMachine vm, IDebugProtocolClient client ) {
 		this.vm		= vm;
 		this.client	= client;
@@ -342,8 +318,8 @@ public class VMController {
 		this.vm		= vm;
 		this.client	= client;
 
-		// Migrate existing breakpoints
-		this.activeBreakpoints.addAll( old.activeBreakpoints );
+		// Migrate logical requests only. JDI bindings belong to the old VM connection.
+		this.breakpointIdCounter.set( old.breakpointIdCounter.get() );
 
 		// Migrate pending breakpoints
 		if ( old.pendingBreakpointsByFile != null ) {
@@ -604,7 +580,7 @@ public class VMController {
 	 *
 	 * @param filePath The source file path to create a targeted request for
 	 */
-	private void createTargetedClassPrepareRequest( String filePath ) {
+	private synchronized void createTargetedClassPrepareRequest( String filePath ) {
 		if ( vm == null ) {
 			return;
 		}
@@ -614,7 +590,12 @@ public class VMController {
 			return;
 		}
 
-		String classPattern = filePathToClassPattern( filePath );
+		boolean	windowsSource	= filePath.matches( "^[A-Za-z]:/.*" ) || filePath.startsWith( "//" );
+		boolean	sourceFilter	= vm.canUseSourceNameFilters() && !windowsSource;
+		// JDI source filters are case-sensitive. For Windows, suspend the class family instead;
+		// the full-path binding check still keeps unrelated sources separate.
+		String	classPattern	= windowsSource ? breakpointClassNamespace( filePath ) + ".*"
+		    : ( sourceFilter ? "boxgenerated.*" : filePathToClassPattern( filePath ) );
 		if ( classPattern == null ) {
 			return;
 		}
@@ -622,6 +603,10 @@ public class VMController {
 		EventRequestManager	requestManager	= vm.eventRequestManager();
 		ClassPrepareRequest	request			= requestManager.createClassPrepareRequest();
 		request.addClassFilter( classPattern );
+		if ( sourceFilter ) {
+			// Only narrows suspension; binding still checks the full mapped source path.
+			request.addSourceNameFilter( "*" + PathMappingService.getFileName( filePath ) );
+		}
 
 		// Before userCodeStarted, use SUSPEND_NONE to avoid blocking during BoxLang init
 		// After userCodeStarted, use SUSPEND_EVENT_THREAD to properly set breakpoints
@@ -646,7 +631,7 @@ public class VMController {
 	 * The previous SUSPEND_NONE requests are deleted and replaced with SUSPEND_EVENT_THREAD
 	 * requests to ensure we can properly set breakpoints when user code classes are loaded.
 	 */
-	private void recreateTargetedClassPrepareRequestsWithSuspend() {
+	private synchronized void recreateTargetedClassPrepareRequestsWithSuspend() {
 		if ( vm == null || targetedClassPrepareRequests.isEmpty() ) {
 			return;
 		}
@@ -710,6 +695,11 @@ public class VMController {
 	 * @return A class pattern for matching (e.g.,
 	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs*)
 	 */
+	private String breakpointClassNamespace( String filePath ) {
+		String lower = filePath.toLowerCase( java.util.Locale.ROOT );
+		return lower.endsWith( ".cfc" ) || lower.endsWith( ".bx" ) ? "boxgenerated.boxclass" : "boxgenerated.templates";
+	}
+
 	private String filePathToClassPattern( String filePath ) {
 		if ( filePath == null || filePath.isEmpty() ) {
 			return null;
@@ -718,7 +708,7 @@ public class VMController {
 		try {
 			// Use BoxLang's FQN class to generate the correct class pattern
 			// This ensures we match exactly what BoxLang generates
-			FQN fqn = FQN.of( "boxgenerated.templates", Path.of( filePath ) );
+			FQN fqn = FQN.of( breakpointClassNamespace( filePath ), Path.of( filePath ) );
 
 			// Append wildcard to match inner classes (closures, lambdas, etc.)
 			return fqn.toString() + "*";
@@ -984,7 +974,7 @@ public class VMController {
 	/**
 	 * Set a breakpoint at the specified file and line
 	 */
-	public boolean setBreakpoint( PendingBreakpoint pending ) {
+	public synchronized boolean setBreakpoint( PendingBreakpoint pending ) {
 		String				filePath		= pending.getFilePath();
 		int					lineNumber		= pending.getSourceBreakpoint().getLine();
 		SourceBreakpoint	srcBp			= pending.getSourceBreakpoint();
@@ -1004,7 +994,6 @@ public class VMController {
 
 			// If VM is not available, just add to pending breakpoints
 			if ( vm == null ) {
-				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, breakpointId, condition, hitCondition, logMessage ) );
 				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
 				return false; // Return false - breakpoint is not yet verified (VM not running)
 			}
@@ -1014,10 +1003,9 @@ public class VMController {
 				return true;
 			}
 
-			// If not successful, add to pending breakpoints for ClassPrepareEvent handling
-			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, breakpointId, condition, hitCondition, logMessage ) );
+			// Keep the logical breakpoint for future class-prepare events.
 			LOGGER.info( "Added breakpoint to pending list: " + filePath + ":" + lineNumber );
-			return true; // Return true since we'll set it when the class loads
+			return false; // Queued is not bound.
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Failed to set breakpoint: " + e.getMessage() );
@@ -1051,16 +1039,22 @@ public class VMController {
 		// Get all loaded classes that might contain this file
 		List<ReferenceType> classes;
 		try {
-			classes = vm.allClasses();
+			if ( !breakpointClassesDiscovered ) {
+				for ( ReferenceType type : vm.allClasses() ) {
+					if ( type.name().startsWith( "boxgenerated." ) ) {
+						breakpointClasses.add( type );
+					}
+				}
+				breakpointClassesDiscovered = true;
+			}
+			classes = new ArrayList<>( breakpointClasses );
 			LOGGER.fine( "Found " + classes.size() + " loaded classes to search" );
 		} catch ( Exception e ) {
 			LOGGER.warning( "Error getting loaded classes: " + e.getMessage() );
 			return false;
 		}
 
-		// Track best matching class - prefer BoxLang generated classes
-		ReferenceType	bestMatch			= null;
-		Location		bestMatchLocation	= null;
+		boolean bound = false;
 
 		for ( ReferenceType refType : classes ) {
 			try {
@@ -1073,23 +1067,15 @@ public class VMController {
 				// Try to find the location for this line in this class
 				List<Location> locations = refType.locationsOfLine( lineNumber );
 
-				if ( !locations.isEmpty() ) {
-					// Check if this location corresponds to our file
-					Location	location	= locations.get( 0 );
-					String		sourceName	= getSourceName( location );
-					String		sourcePath	= getSourcePath( location );
+				for ( Location location : locations ) {
+					String	sourceName	= getSourceName( location );
+					String	sourcePath	= getSourcePath( location );
 
 					LOGGER.fine( "Found location at " + sourceName + " (path: " + sourcePath + ") :" + lineNumber + " in class " + className );
 
-					// Use intelligent path matching that handles:
-					// 1. Full path match (sourcePath == filePath)
-					// 2. Filename-only match (sourceName == filename from filePath)
-					// 3. Suffix match (filePath ends with sourcePath or vice versa)
+					// Require the full mapped source identity; equal basenames are not enough.
 					if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-						bestMatch			= refType;
-						bestMatchLocation	= location;
-						LOGGER.fine( "Found matching boxgenerated class: " + className );
-						// Don't break - keep looking for potentially newer versions
+						bound |= createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
 					}
 				}
 			} catch ( AbsentInformationException e ) {
@@ -1101,13 +1087,7 @@ public class VMController {
 			}
 		}
 
-		if ( bestMatch != null && bestMatchLocation != null ) {
-			LOGGER.fine( "Setting breakpoint on class: " + bestMatch.name() + " at line " + lineNumber );
-			return createBreakpointRequest( breakpointId, bestMatchLocation, filePath, lineNumber, condition, hitCondition, logMessage );
-		}
-
-		LOGGER.fine( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
-		return false;
+		return bound;
 
 	}
 
@@ -1138,14 +1118,13 @@ public class VMController {
 				return false;
 			}
 
-			Location	location	= locations.get( 0 );
-			String		sourceName	= getSourceName( location );
-			String		sourcePath	= getSourcePath( location );
-
-			if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-				LOGGER.fine( "Setting breakpoint on class: " + refType.name() + " at line " + lineNumber );
-				return createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
+			boolean bound = false;
+			for ( Location location : locations ) {
+				if ( pathsMatchForBreakpoint( getSourceName( location ), getSourcePath( location ), filePath ) ) {
+					bound |= createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
+				}
 			}
+			return bound;
 		} catch ( AbsentInformationException e ) {
 			// This class doesn't have debug info
 		} catch ( Exception e ) {
@@ -1160,7 +1139,7 @@ public class VMController {
 	 *
 	 * @param pathMappingService The path mapping service to use
 	 */
-	public void setPathMappingService( PathMappingService pathMappingService ) {
+	public synchronized void setPathMappingService( PathMappingService pathMappingService ) {
 		this.pathMappingService = pathMappingService;
 	}
 
@@ -1182,42 +1161,13 @@ public class VMController {
 			return false;
 		}
 
-		// If we have a path mapping service, use its comprehensive matching
-		if ( pathMappingService != null && sourcePath != null ) {
-			if ( pathMappingService.pathsMatch( sourcePath, filePath ) ) {
-				return true;
-			}
+		// BoxLang may put an absolute SourceFile name behind a generated package prefix.
+		String actual = BoxLangStackFrame.isAbsoluteSourcePath( sourcePath ) ? sourcePath : sourceName;
+		if ( !BoxLangStackFrame.isAbsoluteSourcePath( actual ) ) {
+			return false; // A basename alone cannot identify the requested source safely.
 		}
-
-		String	normalizedFilePath	= PathMappingService.normalizePath( filePath );
-		String	fileName			= PathMappingService.getFileName( filePath );
-
-		// Try full path match first
-		if ( sourcePath != null ) {
-			String normalizedSourcePath = PathMappingService.normalizePath( sourcePath );
-			if ( normalizedSourcePath.equalsIgnoreCase( normalizedFilePath ) ) {
-				return true;
-			}
-			// Check suffix match - the full filePath might end with sourcePath
-			if ( normalizedFilePath.toLowerCase().endsWith( normalizedSourcePath.toLowerCase() ) ) {
-				return true;
-			}
-			// Or sourcePath might end with the relative part of filePath
-			if ( normalizedSourcePath.toLowerCase().endsWith( fileName.toLowerCase() ) &&
-			    normalizedFilePath.toLowerCase().endsWith( fileName.toLowerCase() ) ) {
-				// Both paths have the same filename - likely the same file
-				return true;
-			}
-		}
-
-		// Try filename match - compare JDI sourceName with just the filename from filePath
-		if ( sourceName != null && fileName != null ) {
-			if ( sourceName.equalsIgnoreCase( fileName ) ) {
-				return true;
-			}
-		}
-
-		return false;
+		return pathMappingService == null ? PathMappingService.samePath( actual, filePath )
+		    : pathMappingService.pathsMatch( actual, filePath );
 	}
 
 	/**
@@ -1251,6 +1201,11 @@ public class VMController {
 	private boolean createBreakpointRequest( int breakpointId, Location location, String filePath, int lineNumber,
 	    String condition, String hitCondition, String logMessage ) {
 		try {
+			for ( BreakpointRequest existing : activeBreakpoints ) {
+				if ( Integer.valueOf( breakpointId ).equals( existing.getProperty( "breakPointId" ) ) && location.equals( existing.location() ) ) {
+					return true;
+				}
+			}
 			EventRequestManager	requestManager		= vm.eventRequestManager();
 			BreakpointRequest	breakpointRequest	= requestManager.createBreakpointRequest( location );
 			breakpointRequest.setSuspendPolicy( BreakpointRequest.SUSPEND_EVENT_THREAD );
@@ -1262,7 +1217,7 @@ public class VMController {
 			breakpointRequest.putProperty( "logMessage", logMessage );
 
 			// Initialize hit count for this breakpoint
-			breakpointHitCounts.put( breakpointId, 0 );
+			breakpointHitCounts.putIfAbsent( breakpointId, 0 );
 
 			// Enable the breakpoint
 			breakpointRequest.enable();
@@ -2137,8 +2092,11 @@ public class VMController {
 	/**
 	 * Handle a class prepare event - try to set pending breakpoints
 	 */
-	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
+	private synchronized void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
+		if ( refType.name().startsWith( "boxgenerated." ) ) {
+			breakpointClasses.add( refType );
+		}
 		classPrepareEventCount++;
 
 		// Check if this is the DebuggerUtil class - store it for later use.
@@ -2172,22 +2130,6 @@ public class VMController {
 			}
 		}
 
-		// Try to set any pending breakpoints on THIS specific class (fast path - no vm.allClasses() call)
-		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
-
-		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			// Use the fast path that only checks the newly loaded class
-			if ( trySetBreakpointOnSpecificClass( refType, pending.breakpointId, pending.filePath, pending.lineNumber,
-			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
-				toRemove.add( pending );
-				LOGGER.fine( "[TIMING] Successfully set breakpoint at " + pending.filePath + ":" + pending.lineNumber +
-				    " at T+" + getElapsedTime() + "ms on class " + refType.name() );
-			}
-		}
-
-		// Remove successfully set breakpoints from pending list
-		pendingBreakpoints.removeAll( toRemove );
-
 		// Re-apply any verified breakpoints that might match this newly loaded class
 		// This handles the case where BoxLang recompiles source code and loads a new class version
 		reapplyVerifiedBreakpointsForClass( refType );
@@ -2205,56 +2147,20 @@ public class VMController {
 			return;
 		}
 
-		for ( VerifiedBreakpointInfo verified : verifiedBreakpoints.values() ) {
-			try {
-				// Try to find matching locations in the newly loaded class
-				List<Location> locations = refType.locationsOfLine( verified.getLineNumber() );
-
-				LOGGER.fine( "Checking breakpoint " + verified.getBreakpointId() + " at line " + verified.getLineNumber() +
-				    " - found " + locations.size() + " locations in class " + refType.name() );
-
-				if ( !locations.isEmpty() ) {
-					Location	location	= locations.get( 0 );
-					String		sourceName	= getSourceName( location );
-					String		sourcePath	= getSourcePath( location );
-
-					LOGGER.fine( "Location source: name=" + sourceName + ", path=" + sourcePath +
-					    ", breakpoint file=" + verified.getFilePath() );
-
-					// Check if this class matches the breakpoint's file
-					if ( pathsMatchForBreakpoint( sourceName, sourcePath, verified.getFilePath() ) ) {
-						LOGGER.info( "Path match found for breakpoint " + verified.getBreakpointId() +
-						    " in newly loaded class " + refType.name() );
-
-						// Remove any stale breakpoint requests for this breakpoint ID
-						// The old class version's breakpoint is no longer valid
-						removeStaleBreakpointRequests( verified.getBreakpointId() );
-
-						LOGGER.info( "Re-applying breakpoint " + verified.getBreakpointId() +
-						    " to reloaded class at " + verified.getFilePath() + ":" + verified.getLineNumber() );
-
-						createBreakpointRequest(
-						    verified.getBreakpointId(),
-						    location,
-						    verified.getFilePath(),
-						    verified.getLineNumber(),
-						    verified.getCondition(),
-						    verified.getHitCondition(),
-						    verified.getLogMessage()
-						);
-					}
+		for ( VerifiedBreakpointInfo requested : verifiedBreakpoints.values() ) {
+			if ( trySetBreakpointOnSpecificClass( refType, requested.getBreakpointId(), requested.getFilePath(),
+			    requested.getLineNumber(), requested.getCondition(), requested.getHitCondition(), requested.getLogMessage() ) ) {
+				PendingBreakpoint pending = pendingBreakpointsById.get( requested.getBreakpointId() );
+				if ( pending != null ) {
+					updateBreakpointStatus( pending, true );
 				}
-			} catch ( AbsentInformationException e ) {
-				// This class doesn't have debug info for this line, skip it
-				LOGGER.fine( "No debug info for line " + verified.getLineNumber() + " in class " + refType.name() );
 			}
 		}
 	}
 
 	/**
-	 * Remove stale breakpoint requests for a given breakpoint ID.
-	 * This is called when a class is reloaded and we need to replace the old breakpoint
-	 * with a new one on the new class version.
+	 * Remove JDI requests for a logical breakpoint being deleted/replaced.
+	 * Class preparation must not call this: existing sibling bindings can still execute.
 	 *
 	 * @param breakpointId The breakpoint ID to remove stale requests for
 	 */
@@ -2286,21 +2192,12 @@ public class VMController {
 	/**
 	 * Clear all active breakpoints
 	 */
-	public void clearAllBreakpoints() {
-		if ( vm == null ) {
-			LOGGER.info( "VM is null, no active breakpoints to clear" );
-			return;
+	public synchronized void clearAllBreakpoints() {
+		java.util.Set<String> sources = new java.util.HashSet<>( pendingBreakpointsByFile.keySet() );
+		verifiedBreakpoints.values().forEach( breakpoint -> sources.add( breakpoint.getFilePath() ) );
+		for ( String source : sources ) {
+			clearPendingBreakpointsForFile( source );
 		}
-
-		EventRequestManager requestManager = vm.eventRequestManager();
-
-		for ( BreakpointRequest request : activeBreakpoints ) {
-			requestManager.deleteEventRequest( request );
-		}
-
-		activeBreakpoints.clear();
-		verifiedBreakpoints.clear();
-		LOGGER.info( "Cleared all breakpoints" );
 	}
 
 	/**
@@ -2320,7 +2217,7 @@ public class VMController {
 	/**
 	 * Store pending breakpoint for later verification
 	 */
-	public void storePendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
+	public synchronized void storePendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
 		PendingBreakpoint	pending		= new PendingBreakpoint( source, sourceBreakpoint, breakpoint );
 
 		// Store by file path for quick lookup during verification
@@ -2340,9 +2237,20 @@ public class VMController {
 	/**
 	 * Get all pending breakpoints for a specific file
 	 */
-	public List<PendingBreakpoint> getPendingBreakpointsForFile( String filePath ) {
-		String normalizedPath = normalizeFilePath( filePath );
-		return pendingBreakpointsByFile.getOrDefault( normalizedPath, new ArrayList<>() );
+	public synchronized List<PendingBreakpoint> getPendingBreakpointsForFile( String filePath ) {
+		return List.copyOf( pendingBreakpointsByFile.getOrDefault( breakpointSourceKey( filePath ), List.of() ) );
+	}
+
+	private String breakpointSourceKey( String filePath ) {
+		String normalized = normalizeFilePath( filePath );
+		if ( !pendingBreakpointsByFile.containsKey( normalized ) && pathMappingService != null ) {
+			// Pre-launch requests may still use local paths when launch supplies the remote roots.
+			for ( String existing : pendingBreakpointsByFile.keySet() ) {
+				if ( pathMappingService.pathsMatch( existing, normalized ) )
+					return existing;
+			}
+		}
+		return normalized;
 	}
 
 	/**
@@ -2353,9 +2261,12 @@ public class VMController {
 	}
 
 	/**
-	 * Remove a pending breakpoint (when verified or deleted)
+	 * Remove a logical breakpoint and its active bindings.
 	 */
-	public void removePendingBreakpoint( int breakpointId ) {
+	public synchronized void removePendingBreakpoint( int breakpointId ) {
+		removeStaleBreakpointRequests( breakpointId );
+		verifiedBreakpoints.remove( breakpointId );
+		breakpointHitCounts.remove( breakpointId );
 		PendingBreakpoint pending = pendingBreakpointsById.remove( breakpointId );
 		if ( pending != null ) {
 			String					filePath		= normalizeFilePath( pending.getFilePath() );
@@ -2378,12 +2289,12 @@ public class VMController {
 	/**
 	 * Clear all pending breakpoints for a file (when setting new breakpoints)
 	 */
-	public void clearPendingBreakpointsForFile( String filePath ) {
-		String					normalizedPath	= normalizeFilePath( filePath );
+	public synchronized void clearPendingBreakpointsForFile( String filePath ) {
+		String					normalizedPath	= breakpointSourceKey( filePath );
 		List<PendingBreakpoint>	fileBreakpoints	= pendingBreakpointsByFile.remove( normalizedPath );
 		if ( fileBreakpoints != null ) {
 			for ( PendingBreakpoint pending : fileBreakpoints ) {
-				pendingBreakpointsById.remove( pending.getBreakpoint().getId() );
+				removePendingBreakpoint( pending.getBreakpoint().getId() );
 			}
 			LOGGER.info( "Cleared " + fileBreakpoints.size() + " pending breakpoints for file: " + normalizedPath );
 		}
@@ -2391,8 +2302,9 @@ public class VMController {
 		// Also clear verified breakpoints for this file since they'll be replaced
 		clearVerifiedBreakpointsForFile( filePath );
 
-		// Clear active JDI breakpoint requests for this file
+		// Clear active JDI breakpoint requests and the now-unused class listener.
 		clearActiveBreakpointsForFile( filePath );
+		removeTargetedClassPrepareRequest( normalizedPath );
 	}
 
 	/**
@@ -2452,13 +2364,15 @@ public class VMController {
 
 		for ( Map.Entry<Integer, VerifiedBreakpointInfo> entry : verifiedBreakpoints.entrySet() ) {
 			String verifiedPath = normalizeFilePath( entry.getValue().getFilePath() );
-			if ( verifiedPath.equalsIgnoreCase( normalizedPath ) ) {
+			if ( PathMappingService.samePath( verifiedPath, normalizedPath ) ) {
 				toRemove.add( entry.getKey() );
 			}
 		}
 
 		for ( Integer id : toRemove ) {
+			removeStaleBreakpointRequests( id );
 			verifiedBreakpoints.remove( id );
+			breakpointHitCounts.remove( id );
 		}
 
 		if ( !toRemove.isEmpty() ) {
@@ -2473,28 +2387,29 @@ public class VMController {
 		return new HashMap<>( pendingBreakpointsByFile );
 	}
 
+	private void updateBreakpointStatus( PendingBreakpoint pending, boolean bound ) {
+		Breakpoint	breakpoint	= pending.getBreakpoint();
+		boolean		changed		= breakpoint.isVerified() != bound;
+		breakpoint.setVerified( bound );
+		breakpoint.setMessage( bound ? "Breakpoint verified and set" : "No executable location is loaded for this source and line" );
+		if ( changed && client != null ) {
+			org.eclipse.lsp4j.debug.BreakpointEventArguments event = new org.eclipse.lsp4j.debug.BreakpointEventArguments();
+			event.setReason( "changed" );
+			event.setBreakpoint( breakpoint );
+			client.breakpoint( event );
+		}
+	}
+
 	/**
 	 * Verify and set pending breakpoints using JDI
 	 */
-	public void verifyAndSetPendingBreakpoints() {
+	public synchronized void verifyAndSetPendingBreakpoints() {
 		int totalPending = pendingBreakpointsById.size();
 		if ( totalPending > 0 ) {
 			LOGGER.info( "Setting " + totalPending + " pending breakpoints" );
 
 			for ( PendingBreakpoint pending : pendingBreakpointsById.values() ) {
-				String	filePath	= pending.getFilePath();
-				int		lineNumber	= pending.getSourceBreakpoint().getLine();
-
-				boolean	success		= setBreakpoint( pending );
-				if ( success ) {
-					// Mark breakpoint as verified
-					pending.getBreakpoint().setVerified( true );
-					pending.getBreakpoint().setMessage( "Breakpoint verified and set" );
-					LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
-				} else {
-					pending.getBreakpoint().setMessage( "Could not verify breakpoint location" );
-					LOGGER.warning( "Failed to set breakpoint at " + filePath + ":" + lineNumber );
-				}
+				updateBreakpointStatus( pending, setBreakpoint( pending ) );
 			}
 		}
 	}
@@ -2508,10 +2423,29 @@ public class VMController {
 	 *
 	 * @return The generated Breakpoint object
 	 */
-	public Breakpoint trackSourceBreakpoint( Source source, SourceBreakpoint sourceBreakpoint ) {
+	public synchronized List<Breakpoint> replaceSourceBreakpoints( Source source, SourceBreakpoint[] breakpoints ) {
+		if ( source == null || source.getPath() == null || source.getPath().isBlank() ) {
+			throw new IllegalArgumentException( "A source path is required for breakpoints" );
+		}
+		List<SourceBreakpoint>	requested	= breakpoints == null ? List.of() : java.util.Arrays.asList( breakpoints );
+		List<PendingBreakpoint>	existing	= getPendingBreakpointsForFile( source.getPath() );
+		if ( !existing.stream().map( PendingBreakpoint::getSourceBreakpoint ).toList().equals( requested ) ) {
+			clearPendingBreakpointsForFile( source.getPath() );
+			for ( SourceBreakpoint breakpoint : requested ) {
+				trackSourceBreakpoint( source, breakpoint );
+			}
+		}
+		verifyAndSetPendingBreakpoints();
+		return getPendingBreakpointsForFile( source.getPath() ).stream().map( PendingBreakpoint::getBreakpoint ).toList();
+	}
+
+	public synchronized Breakpoint trackSourceBreakpoint( Source source, SourceBreakpoint sourceBreakpoint ) {
 		// Create the breakpoint with generated ID and initial state
 		Breakpoint breakpoint = new Breakpoint();
 		breakpoint.setId( generateBreakpointId() );
+		Source responseSource = new Source();
+		responseSource.setPath( pathMappingService == null ? source.getPath() : pathMappingService.toLocalPath( source.getPath() ) );
+		breakpoint.setSource( responseSource );
 		breakpoint.setLine( sourceBreakpoint.getLine() );
 		breakpoint.setVerified( false ); // Mark as unverified until program starts
 		breakpoint.setMessage( "Breakpoint will be verified when program starts" );
@@ -2533,9 +2467,11 @@ public class VMController {
 			return "";
 		}
 
-		// Convert to absolute path and normalize separators
-		Path path = Paths.get( filePath ).toAbsolutePath().normalize();
-		return path.toString().replace( '\\', '/' );
+		String path = PathMappingService.normalizePath( filePath );
+		if ( !BoxLangStackFrame.isAbsoluteSourcePath( path ) ) {
+			path = PathMappingService.normalizePath( Paths.get( path ).toAbsolutePath().toString() );
+		}
+		return path.matches( "^[A-Za-z]:/.*" ) || path.startsWith( "//" ) ? path.toLowerCase( java.util.Locale.ROOT ) : path;
 	}
 
 	/**
