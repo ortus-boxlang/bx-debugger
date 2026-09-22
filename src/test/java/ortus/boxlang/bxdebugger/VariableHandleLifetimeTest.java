@@ -52,5 +52,7 @@ class VariableHandleLifetimeTest {
 		}
 		variables.clear();
 		assertNull( variables.getValue( ids[ 255 ] ) );
+		verify( value ).disableCollection();
+		verify( value, timeout( 2000 ) ).enableCollection();
 	}
 }

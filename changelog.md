@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BLIDE-329 stabilize stop/resume behavior
 - BLIDE-330 Improve breakpoint handling
 - BLIDE-331 Harden session lifecycle
+- BLIDE-332 Add query and paged variable inspection
 
 ## [1.1.1] - 2026-03-19
 

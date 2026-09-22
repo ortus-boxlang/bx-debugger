@@ -371,6 +371,13 @@ public class VMController {
 
 	}
 
+	void retainInvocationResult( Value value ) {
+		synchronized ( stopLock ) {
+			// ponytail: helper intermediates belong to every active stop; use per-request ownership if overlapping-stop memory matters.
+			breakPointContexts.values().forEach( context -> context.getVariables().retain( value ) );
+		}
+	}
+
 	public CompletableFuture<Value> invokeStatic( String className, String methodName, List<String> paramTypes, List<Value> args ) {
 		return InvokeTools.submitAndInvokeStatic( this, className, methodName, paramTypes, args );
 	}

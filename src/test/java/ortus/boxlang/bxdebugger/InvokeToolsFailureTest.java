@@ -71,10 +71,51 @@ class InvokeToolsFailureTest {
 		controller = spy( new VMController( null, null ) );
 		RuntimeException original = new IllegalStateException();
 		doThrow( original ).when( controller ).getDebuggerUtilClass();
-		var future = isStatic
-		    ? InvokeTools.submitAndInvokeStatic( controller, "Target", "run", List.of(), List.of() )
-		    : InvokeTools.submitAndInvoke( controller, mock( ObjectReference.class ), "run", List.of(), List.of() );
+		ObjectReference	argument	= mock( ObjectReference.class );
+		var				future		= isStatic
+		    ? InvokeTools.submitAndInvokeStatic( controller, "Target", "run", List.of( "java.lang.Object" ), List.of( argument ) )
+		    : InvokeTools.submitAndInvoke( controller, mock( ObjectReference.class ), "run", List.of( "java.lang.Object" ), List.of( argument ) );
 		assertSame( original, assertThrows( ExecutionException.class, () -> future.get( 5, TimeUnit.SECONDS ) ).getCause() );
+		verify( argument ).disableCollection();
+		verify( argument ).enableCollection();
+	}
+
+	@Test
+	void transfersResultOwnershipBeforeRemovingItFromTheHelper() throws Exception {
+		VirtualMachine vm = mock( VirtualMachine.class, RETURNS_DEEP_STUBS );
+		controller = spy( new VMController( vm, null ) );
+		ClassType		helper	= mock( ClassType.class );
+		ThreadReference	thread	= mock( ThreadReference.class );
+		doReturn( helper ).when( controller ).getDebuggerUtilClass();
+		doReturn( true ).when( controller ).isDebuggerUtilStarted();
+		doReturn( thread ).when( controller ).getPreparedDebugInvokeThread();
+		ArrayType arrays = mock( ArrayType.class );
+		when( vm.classesByName( "java.lang.String[]" ) ).thenReturn( List.of( arrays ) );
+		when( vm.classesByName( "java.lang.Object[]" ) ).thenReturn( List.of( arrays ) );
+		when( arrays.newInstance( 0 ) ).thenReturn( mock( ArrayReference.class ) );
+		Method enqueue = mock( Method.class ), peek = mock( Method.class ), poll = mock( Method.class );
+		when( helper.methodsByName( "enqueueStatic" ) ).thenReturn( List.of( enqueue ) );
+		when( helper.methodsByName( "peekResult" ) ).thenReturn( List.of( peek ) );
+		when( helper.methodsByName( "pollResult" ) ).thenReturn( List.of( poll ) );
+		StringReference task = mock( StringReference.class );
+		when( task.value() ).thenReturn( "task" );
+		ObjectReference	result	= mock( ObjectReference.class );
+		ReferenceType	type	= mock( ReferenceType.class );
+		Field			field	= mock( Field.class );
+		Value			answer	= mock( Value.class );
+		when( result.referenceType() ).thenReturn( type );
+		when( type.allFields() ).thenReturn( List.of( field ) );
+		when( field.name() ).thenReturn( "value" );
+		when( result.getValue( field ) ).thenReturn( answer );
+		when( helper.invokeMethod( eq( thread ), eq( enqueue ), anyList(), anyInt() ) ).thenReturn( task );
+		when( helper.invokeMethod( eq( thread ), eq( peek ), anyList(), anyInt() ) ).thenReturn( result );
+		assertSame( answer, InvokeTools.submitAndInvokeStatic( controller, "Target", "run", List.of(), List.of() ).get( 5, TimeUnit.SECONDS ) );
+		var order = inOrder( helper, result );
+		order.verify( helper ).invokeMethod( thread, peek, List.of( task ), ObjectReference.INVOKE_SINGLE_THREADED );
+		order.verify( result ).disableCollection();
+		order.verify( helper ).invokeMethod( thread, poll, List.of( task ), ObjectReference.INVOKE_SINGLE_THREADED );
+		order.verify( result ).enableCollection();
+		verify( vm, never() ).mirrorOf( "task" );
 	}
 
 	@ParameterizedTest
@@ -94,6 +135,7 @@ class InvokeToolsFailureTest {
 		Method	enqueue	= mock( Method.class );
 		Method	poll	= mock( Method.class );
 		when( helper.methodsByName( isStatic ? "enqueueStatic" : "enqueueOnObject" ) ).thenReturn( List.of( enqueue ) );
+		when( helper.methodsByName( "peekResult" ) ).thenReturn( List.of( poll ) );
 		when( helper.methodsByName( "pollResult" ) ).thenReturn( List.of( poll ) );
 		StringReference taskId = mock( StringReference.class );
 		when( taskId.value() ).thenReturn( "task" );

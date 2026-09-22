@@ -716,7 +716,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				throw new IllegalArgumentException( "No active debug session for variables reference " + args.getVariablesReference() );
 			VariablesResponse response = new VariablesResponse();
 			response.setVariables( vmController.getVariables( args.getVariablesReference() )
-			    .getVariablesFor( args.getVariablesReference() ).toArray( Variable[]::new ) );
+			    .getVariablesFor( args.getVariablesReference(), args.getStart(), args.getCount(), args.getFilter() ).toArray( Variable[]::new ) );
 			return response;
 		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "read variables", error ) ) );
 	}
@@ -744,6 +744,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				    response.setResult( evalVariable.getValue() );
 				    response.setType( evalVariable.getType() );
 				    response.setVariablesReference( evalVariable.getVariablesReference() );
+				    response.setNamedVariables( evalVariable.getNamedVariables() );
+				    response.setIndexedVariables( evalVariable.getIndexedVariables() );
 				    return response;
 			    } );
 		} ).exceptionallyCompose( error -> CompletableFuture.failedFuture( requestError( "evaluate expression", error ) ) );
