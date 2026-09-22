@@ -62,18 +62,45 @@ import ortus.boxlang.runtime.util.FQN;
  */
 public class VMController {
 
-	private static final Logger LOGGER = Logger.getLogger( VMController.class.getName() );
+	private static final Logger	LOGGER				= Logger.getLogger( VMController.class.getName() );
 
-	/**
-	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
-	 *
-	 * @param message The error message to log
-	 */
-	private static void fatalError( String message ) {
-		LOGGER.severe( "FATAL: " + message );
-		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
-		System.exit( 1 );
+	private Runnable			terminationHandler	= () -> {
+													};
+
+	public void setTerminationHandler( Runnable handler ) {
+		terminationHandler = handler;
+	}
+
+	private void targetTerminated() {
+		stopEventProcessing();
+		terminationHandler.run();
+	}
+
+	final Object											invocationLock		= new Object();
+	private final java.util.concurrent.ExecutorService		invocationExecutor	= java.util.concurrent.Executors.newSingleThreadExecutor( task -> {
+																					Thread thread = new Thread( task, "DebuggerInvocation" );
+																					thread.setDaemon( true );
+																					return thread;
+																				} );
+	private final java.util.concurrent.ExecutorService		decisionExecutor	= java.util.concurrent.Executors.newSingleThreadExecutor( task -> {
+																					Thread thread = new Thread( task, "BreakpointDecision" );
+																					thread.setDaemon( true );
+																					return thread;
+																				} );
+	private final java.util.Set<CompletableFuture<Value>>	invocations			= ConcurrentHashMap.newKeySet();
+
+	CompletableFuture<Value> submitInvocation( java.util.function.Supplier<Value> action ) {
+		synchronized ( invocations ) {
+			if ( invocationExecutor.isShutdown() )
+				return CompletableFuture.failedFuture( new IllegalStateException( "Debug session has ended" ) );
+			// Expansion callbacks can enqueue and join more helper calls; complete them off the serial invocation lane.
+			CompletableFuture<Value> future = CompletableFuture.supplyAsync( action, invocationExecutor )
+			    .whenCompleteAsync( ( value, error ) -> {
+			    } );
+			invocations.add( future );
+			future.whenComplete( ( value, error ) -> invocations.remove( future ) );
+			return future;
+		}
 	}
 
 	public final VirtualMachine												vm;
@@ -99,8 +126,8 @@ public class VMController {
 	private Map<Long, StepRequest>											stepRequests					= new ConcurrentHashMap<>();
 
 	private MethodEntryRequest												methodEntryRequestDebugger		= null;
-	private CompletableFuture<Void>											debugFuture						= null;
-	private ThreadReference													debugThread						= null;
+	private volatile CompletableFuture<Void>								debugFuture						= null;
+	private volatile ThreadReference										debugThread						= null;
 
 	// Exception breakpoint support
 	private static final String												BOX_RUNTIME_EXCEPTION_CLASS		= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
@@ -368,11 +395,11 @@ public class VMController {
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
 		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.debug.DebuggerExternalConnectionUtil" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		CompletableFuture<Void> prepared = new CompletableFuture<>();
+		this.debugFuture = prepared;
 		this.methodEntryRequestDebugger.enable();
 		LOGGER.info( "Created method entry request for DebuggerUtil.debuggerHook()" );
-		this.debugFuture = new CompletableFuture<>();
-
-		return this.debugFuture;
+		return prepared;
 	}
 
 	public ThreadReference getPreparedDebugInvokeThread() {
@@ -397,20 +424,11 @@ public class VMController {
 			CompletableFuture<Void> future = pauseDebugThread();
 
 			// Wait for the MethodEntryEvent to fire (max 5 seconds - should happen within 100ms)
-			try {
-				future.get( 5, TimeUnit.SECONDS );
-			} catch ( TimeoutException e ) {
-				fatalError( "Timeout waiting for debug thread to suspend at MethodEntryEvent - DebuggerUtil may not be running" );
-				return null; // Unreachable, but satisfies compiler
-			} catch ( ExecutionException e ) {
-				fatalError( "Error waiting for debug thread suspension: " + e.getMessage() );
-				return null; // Unreachable, but satisfies compiler
-			}
+			future.get( 5, TimeUnit.SECONDS );
 
 			// debugThread is now set by handleMethodEntryEvent() and is properly suspended
 			if ( debugThread == null ) {
-				fatalError( "Debug thread not captured after MethodEntryEvent" );
-				return null; // Unreachable, but satisfies compiler
+				throw new IllegalStateException( "Debug thread not captured after MethodEntryEvent" );
 			}
 
 			// Ensure the worker thread is running to process queued tasks
@@ -420,12 +438,12 @@ public class VMController {
 			return debugThread;
 		} catch ( InterruptedException e ) {
 			Thread.currentThread().interrupt();
-			fatalError( "Interrupted while waiting for debug thread: " + e.getMessage() );
-		} catch ( Exception e ) {
-			fatalError( "Error preparing debug thread: " + e.getMessage() );
+			throw new java.util.concurrent.CompletionException( e );
+		} catch ( TimeoutException e ) {
+			throw new IllegalStateException( "Helper preparation timed out after 5 seconds; DebuggerUtil may not be running", e );
+		} catch ( ExecutionException e ) {
+			throw new java.util.concurrent.CompletionException( e.getCause() );
 		}
-
-		return null; // Unreachable, but satisfies compiler
 	}
 
 	/**
@@ -794,9 +812,7 @@ public class VMController {
 			}
 		}
 
-		// Service not running - this is a fatal error
-		fatalError( "DebuggerUtil not running" );
-		return false; // Unreachable, but satisfies compiler
+		throw new IllegalStateException( "DebuggerUtil not running; start BoxLang with debugMode=true" );
 	}
 
 	/**
@@ -1292,9 +1308,15 @@ public class VMController {
 			}
 			stepRequests.clear();
 		}
-		if ( eventProcessingThread != null ) {
-			eventProcessingThread.interrupt();
+		decisionExecutor.shutdownNow();
+		synchronized ( invocations ) {
+			invocationExecutor.shutdownNow();
+			invocations.forEach( future -> future.completeExceptionally( new IllegalStateException( "Debug session has ended" ) ) );
 		}
+		CompletableFuture<Void> preparing = debugFuture;
+		if ( preparing != null )
+			preparing.completeExceptionally( new IllegalStateException( "Debug session has ended" ) );
+		// Queue polling/disposal wakes the pump. Interrupting a DAP socket write would close the transport.
 		LOGGER.info( "Stopped breakpoint event processing" );
 	}
 
@@ -1335,7 +1357,7 @@ public class VMController {
 					try {
 						if ( vm != null && vm.process() != null && !vm.process().isAlive() ) {
 							LOGGER.warning( "VM process has terminated! Exit value: " + vm.process().exitValue() );
-							stopEventProcessing();
+							targetTerminated();
 							return;
 						}
 					} catch ( Exception pe ) {
@@ -1351,8 +1373,13 @@ public class VMController {
 					Event event = eventIterator.nextEvent();
 
 					if ( event instanceof BreakpointEvent be ) {
-						if ( !stopHandled )
-							handleBreakpointEvent( be, eventSet );
+						if ( !stopHandled ) {
+							if ( be.request().getProperty( "condition" ) != null || be.request().getProperty( "logMessage" ) != null ) {
+								decisionExecutor.execute( () -> handleBreakpointEvent( be, eventSet ) );
+							} else {
+								handleBreakpointEvent( be, eventSet );
+							}
+						}
 						stopHandled = true;
 					} else if ( event instanceof StepEvent se ) {
 						if ( !stopHandled )
@@ -1373,7 +1400,7 @@ public class VMController {
 						}
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
-						stopEventProcessing();
+						targetTerminated();
 						return;
 					}
 				}
@@ -1421,6 +1448,9 @@ public class VMController {
 				// If shouldResume is false (breakpoint hit), the thread stays suspended
 				// until the debugger client sends a continue/step request
 
+			} catch ( com.sun.jdi.VMDisconnectedException e ) {
+				targetTerminated();
+				return;
 			} catch ( InterruptedException e ) {
 				LOGGER.info( "Event processing interrupted" );
 				Thread.currentThread().interrupt();
@@ -1557,19 +1587,21 @@ public class VMController {
 	 * Handle a breakpoint event
 	 */
 	private void handleBreakpointEvent( BreakpointEvent event, EventSet eventSet ) {
+		BreakpointContext	context			= null;
+		Integer				breakpointId	= null;
 		try {
 			// Ensure helper threads are available for condition evaluation
 			// The worker thread processes tasks, the invoker thread is used for JDI invocations
 			// ensureDebugHelperThreadsReady();
 
-			Location			location		= event.location();
-			String				sourceName		= getSourceName( location );
-			int					lineNumber		= location.lineNumber();
-			BreakpointRequest	request			= ( BreakpointRequest ) event.request();
-			Integer				breakpointId	= ( Integer ) request.getProperty( "breakPointId" );
-			String				condition		= ( String ) request.getProperty( "condition" );
-			String				hitCondition	= ( String ) request.getProperty( "hitCondition" );
-			String				logMessage		= ( String ) request.getProperty( "logMessage" );
+			Location			location	= event.location();
+			String				sourceName	= getSourceName( location );
+			int					lineNumber	= location.lineNumber();
+			BreakpointRequest	request		= ( BreakpointRequest ) event.request();
+			breakpointId = ( Integer ) request.getProperty( "breakPointId" );
+			String	condition		= ( String ) request.getProperty( "condition" );
+			String	hitCondition	= ( String ) request.getProperty( "hitCondition" );
+			String	logMessage		= ( String ) request.getProperty( "logMessage" );
 
 			LOGGER.info( "Breakpoint hit at " + sourceName + ":" + lineNumber );
 
@@ -1578,8 +1610,8 @@ public class VMController {
 			breakpointHitCounts.put( breakpointId, hitCount );
 
 			// Track context for expression evaluation (needed before condition check)
-			int					contextId	= generateBreakpointId();
-			BreakpointContext	context		= trackBreakpointContext( contextId, event.thread(), eventSet );
+			int contextId = generateBreakpointId();
+			context = trackBreakpointContext( contextId, event.thread(), eventSet );
 			if ( context == null )
 				return;
 
@@ -1605,7 +1637,7 @@ public class VMController {
 			if ( logMessage != null && !logMessage.isEmpty() ) {
 				String expandedMessage = expandLogMessage( contextId, logMessage, hitCount );
 				sendLogOutput( expandedMessage, sourceName, lineNumber );
-				LOGGER.info( "Logpoint: " + expandedMessage );
+				LOGGER.fine( "Logpoint: " + expandedMessage );
 				resumeWithoutNotification( context );
 				return;
 			}
@@ -1628,7 +1660,17 @@ public class VMController {
 			}
 
 		} catch ( Exception e ) {
-			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );
+			LOGGER.log( java.util.logging.Level.WARNING, "Breakpoint evaluation failed", e );
+			if ( context != null ) {
+				StoppedEventArguments stopped = new StoppedEventArguments();
+				stopped.setReason( "breakpoint" );
+				stopped.setDescription( "Breakpoint evaluation failed: " + e.getMessage() );
+				stopped.setThreadId( ( int ) event.thread().uniqueID() );
+				stopped.setHitBreakpointIds( new Integer[] { breakpointId } );
+				publishStop( context, stopped );
+			} else if ( eventProcessingActive ) {
+				eventSet.resume();
+			}
 		}
 	}
 
@@ -1674,22 +1716,19 @@ public class VMController {
 		try {
 			Optional<BreakpointContext> bpContextOpt = getBreakpointContext( contextId );
 			if ( bpContextOpt.isEmpty() ) {
-				LOGGER.warning( "No breakpoint context found for condition evaluation" );
-				return true; // Default to stopping if we can't evaluate
+				throw new IllegalStateException( "No stopped context for condition evaluation" );
 			}
 
 			BreakpointContext	bpContext	= bpContextOpt.get();
 			ObjectReference		context		= bpContext.getContext();
 
 			if ( context == null ) {
-				LOGGER.warning( "No IBoxContext found for condition evaluation" );
-				return true;
+				throw new IllegalStateException( "No IBoxContext for condition evaluation" );
 			}
 
 			ObjectReference runtime = ( ObjectReference ) getRuntime().get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
 			if ( runtime == null ) {
-				LOGGER.warning( "Could not get runtime for condition evaluation" );
-				return true;
+				throw new IllegalStateException( "Runtime unavailable for condition evaluation" );
 			}
 
 			CompletableFuture<Value>	evalFuture	= InvokeTools.submitAndInvoke(
@@ -1703,12 +1742,13 @@ public class VMController {
 			Value						result		= evalFuture.get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
 			return isTruthy( result );
 
+		} catch ( InterruptedException e ) {
+			Thread.currentThread().interrupt();
+			throw new java.util.concurrent.CompletionException( e );
 		} catch ( TimeoutException e ) {
-			LOGGER.warning( "Condition evaluation timed out after " + CONDITION_EVAL_TIMEOUT_SECONDS + " seconds: " + condition );
-			return true; // Default to stopping on timeout
+			throw new IllegalStateException( "Condition evaluation timed out after " + CONDITION_EVAL_TIMEOUT_SECONDS + " seconds", e );
 		} catch ( Exception e ) {
-			LOGGER.warning( "Error evaluating condition: " + e.getMessage() );
-			return true; // Default to stopping on error
+			throw new java.util.concurrent.CompletionException( e );
 		}
 	}
 
@@ -1742,6 +1782,10 @@ public class VMController {
 		if ( value instanceof com.sun.jdi.StringReference ) {
 			String strValue = ( ( com.sun.jdi.StringReference ) value ).value();
 			return strValue != null && !strValue.isEmpty() && !strValue.equalsIgnoreCase( "false" );
+		}
+
+		if ( value instanceof ObjectReference boxed && boxed.referenceType().name().equals( "java.lang.Boolean" ) ) {
+			return isTruthy( boxed.getValue( boxed.referenceType().fieldByName( "value" ) ) );
 		}
 
 		// Handle ObjectReference - non-null is truthy
@@ -1869,19 +1913,21 @@ public class VMController {
 	 * Send a log output event to the debug client
 	 */
 	private void sendLogOutput( String message, String sourceName, int lineNumber ) {
-		if ( client != null ) {
-			OutputEventArguments outputArgs = new OutputEventArguments();
-			outputArgs.setCategory( "console" );
-			outputArgs.setOutput( message + "\n" );
+		synchronized ( stopLock ) {
+			if ( client != null && eventProcessingActive ) {
+				OutputEventArguments outputArgs = new OutputEventArguments();
+				outputArgs.setCategory( "console" );
+				outputArgs.setOutput( message + "\n" );
 
-			if ( sourceName != null ) {
-				Source source = new Source();
-				source.setPath( sourceName );
-				outputArgs.setSource( source );
-				outputArgs.setLine( lineNumber );
+				if ( sourceName != null ) {
+					Source source = new Source();
+					source.setPath( sourceName );
+					outputArgs.setSource( source );
+					outputArgs.setLine( lineNumber );
+				}
+
+				client.output( outputArgs );
 			}
-
-			client.output( outputArgs );
 		}
 	}
 
@@ -2024,7 +2070,7 @@ public class VMController {
 
 	private void publishStop( BreakpointContext context, StoppedEventArguments event ) {
 		synchronized ( stopLock ) {
-			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
+			if ( eventProcessingActive && breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
 				event.setAllThreadsStopped( false );
 				client.stopped( event );
 			}

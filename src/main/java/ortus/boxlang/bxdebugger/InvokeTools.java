@@ -27,8 +27,6 @@ public class InvokeTools {
 	private static final Logger							LOGGER		= Logger.getLogger( InvokeTools.class.getName() );
 	public static CompletableFuture<ThreadReference>	debugThread	= new CompletableFuture<>();
 
-	private static final Object							invokeLock	= new Object();
-
 	/**
 	 * Fail the invocation when DebuggerUtil is unavailable without terminating the adapter.
 	 *
@@ -41,7 +39,7 @@ public class InvokeTools {
 	}
 
 	public static ObjectReference createIntegerRef( VMController vmController, int value ) {
-		synchronized ( invokeLock ) {
+		synchronized ( vmController.invocationLock ) {
 			ClassType	integerClass	= ( ClassType ) vmController.vm.classesByName( "java.lang.Integer" ).get( 0 );
 			Method		valueOfMethod	= null;
 			for ( Method m : integerClass.methodsByName( "valueOf" ) ) {
@@ -74,8 +72,8 @@ public class InvokeTools {
 	// TODO probably want to change this to just directly use the signature to find the method
 	public static CompletableFuture<Value> submitAndInvokeStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames,
 	    List<Value> args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			synchronized ( invokeLock ) {
+		return vmController.submitInvocation( () -> {
+			synchronized ( vmController.invocationLock ) {
 				try {
 					String taskId = enqueueStatic( vmController, target, methodName, paramTypeNames, args );
 					if ( taskId == null ) {
@@ -93,8 +91,8 @@ public class InvokeTools {
 	// TODO probably want to change this to just directly use the signature to find the method
 	public static CompletableFuture<Value> submitAndInvoke( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
 	    List<Value> args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			synchronized ( invokeLock ) {
+		return vmController.submitInvocation( () -> {
+			synchronized ( vmController.invocationLock ) {
 				try {
 					String taskId = enqueueOnObject( vmController, target, methodName, paramTypeNames, args );
 					if ( taskId == null ) {
@@ -132,7 +130,25 @@ public class InvokeTools {
 				    Collections.singletonList( vmController.vm.mirrorOf( taskId ) ),
 				    ObjectReference.INVOKE_SINGLE_THREADED );
 				if ( res != null ) {
-					return findValueOfPropertyByName( ( ObjectReference ) res, "value" );
+					ObjectReference	result	= ( ObjectReference ) res;
+					Value			failure	= findValueOfPropertyByName( result, "exception" );
+					if ( failure instanceof ObjectReference exception ) {
+						var				messages	= new java.util.StringJoiner( ": " );
+						var				seen		= new java.util.HashSet<Long>();
+						ObjectReference	current		= exception;
+						while ( seen.add( current.uniqueID() ) ) {
+							String	type	= current.referenceType().name();
+							Value	detail	= findValueOfPropertyByName( current, "detailMessage" );
+							messages.add( type + ( detail instanceof StringReference text ? ": " + text.value() : "" ) );
+							Value cause = findValueOfPropertyByName( current,
+							    type.equals( "java.lang.reflect.InvocationTargetException" ) ? "target" : "cause" );
+							if ( ! ( cause instanceof ObjectReference next ) )
+								break;
+							current = next;
+						}
+						throw new IllegalStateException( "Target evaluation failed: " + messages, new InvocationException( exception ) );
+					}
+					return findValueOfPropertyByName( result, "value" );
 				}
 				Thread.sleep( 50 );
 			}

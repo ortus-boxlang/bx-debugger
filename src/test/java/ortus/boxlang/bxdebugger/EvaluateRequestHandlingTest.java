@@ -231,7 +231,7 @@ class EvaluateRequestHandlingTest {
 		ExecutionException	error	= assertThrows( ExecutionException.class,
 		    () -> evaluate( expired ? -1 : frames[ 0 ].getId(),
 		        expired ? "writeDump(marker)" : "writeDump(nonexistentTicket01Variable)", "repl" ) );
-		assertEvaluationFailure( error, expired ? "frame" : "Dump produced no HTML" );
+		assertEvaluationFailure( error, expired ? "frame" : "Target evaluation failed" );
 		assertTrue( dumps.isEmpty(), "Failed dumps must not emit a success event" );
 		assertEquals( "\"callee\"", evaluate( frames[ 0 ].getId(), "marker" ).getResult() );
 		EvaluateResponse response = evaluate( frames[ 0 ].getId(), "writeDump(marker)", "repl" );

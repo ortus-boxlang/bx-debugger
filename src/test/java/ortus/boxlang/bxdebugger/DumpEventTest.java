@@ -171,12 +171,13 @@ public class DumpEventTest {
 
 				// Regular evaluate — should NOT fire dump event
 				EvaluateArguments	evalArgs			= new EvaluateArguments();
-				evalArgs.setExpression( "trivial" );
+				evalArgs.setExpression( "myStruct.name" );
 				evalArgs.setContext( "repl" );
 				evalArgs.setFrameId( frameId );
 
 				EvaluateResponse evalResponse = server.evaluate( evalArgs ).get( TIMEOUT, TimeUnit.SECONDS );
 				assertNotNull( evalResponse );
+				assertThat( evalResponse.getResult() ).isEqualTo( "\"BoxLang\"" );
 
 				// No dump events should have been received
 				assertThat( client.getDumpEvents() ).isEmpty();

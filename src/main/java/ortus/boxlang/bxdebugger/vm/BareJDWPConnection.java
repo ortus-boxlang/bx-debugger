@@ -49,6 +49,7 @@ public class BareJDWPConnection implements IVMConnection {
 		Map<String, com.sun.jdi.connect.Connector.Argument>	cArgs		= connector.defaultArguments();
 		cArgs.get( "hostname" ).setValue( hostname );
 		cArgs.get( "port" ).setValue( String.valueOf( port ) );
+		cArgs.get( "timeout" ).setValue( "1000" ); // Eight attempts plus backoff: at most about 14 seconds.
 
 		final int	maxAttempts	= 8;
 		int			attempt		= 1;
@@ -59,6 +60,8 @@ public class BareJDWPConnection implements IVMConnection {
 
 				return vm;
 			} catch ( Exception ex ) {
+				if ( Thread.currentThread().isInterrupted() )
+					throw ex;
 				if ( attempt >= maxAttempts ) {
 					throw new RuntimeException( ex );
 				}

@@ -12,7 +12,7 @@ public class TestDebugClient implements IBoxLangDebugClient {
 
 	private CompletableFuture<StoppedEventArguments>	stoppedEventFuture		= null;
 	private final Queue<StoppedEventArguments>			stoppedEvents			= new ArrayDeque<>();
-	private CompletableFuture<Void>						initializedEventFuture	= null;
+	private final CompletableFuture<Void>				initializedEventFuture	= new CompletableFuture<>();
 	private final List<BoxLangDumpEventBody>			dumpEvents				= new ArrayList<>();
 	private CompletableFuture<BoxLangDumpEventBody>		dumpEventFuture			= null;
 
@@ -44,8 +44,6 @@ public class TestDebugClient implements IBoxLangDebugClient {
 	}
 
 	public CompletableFuture<Void> waitForInitializedEvent() {
-		initializedEventFuture = new CompletableFuture<>();
-
 		return initializedEventFuture;
 	}
 

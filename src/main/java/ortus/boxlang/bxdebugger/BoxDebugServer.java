@@ -72,6 +72,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	private VirtualMachine									vm;
 	private IBoxLangDebugClient								client;
 	private ExecutorService									outputMonitorExecutor;
+	// Virtual-thread socket I/O is interruptible, including the JDWP handshake (connector timeout is TCP-only).
+	private final ExecutorService							setupExecutor			= Executors.newVirtualThreadPerTaskExecutor();
 	private VMController									vmController;
 	private SourceManager									sourceManager			= new SourceManager();
 	private PathMappingService								pathMappingService;
@@ -200,7 +202,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		capabilities.setExceptionBreakpointFilters( new ExceptionBreakpointsFilter[] { caughtExceptionFilter, uncaughtExceptionFilter } );
 		capabilities.setSupportsDelayedStackTraceLoading( false );
 		capabilities.setSupportsLoadedSourcesRequest( false );
-		capabilities.setSupportsLogPoints( false );
 		capabilities.setSupportsTerminateThreadsRequest( false );
 		capabilities.setSupportsSetExpression( false );
 		capabilities.setSupportsDataBreakpoints( false );
@@ -211,10 +212,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 		LOGGER.info( "Sending capabilities to client" );
 
-		// Send initialized event immediately - no delay needed
-		// The client will then send setBreakpoints, configurationDone, etc.
-		CompletableFuture.runAsync( () -> client.initialized() );
-
+		// Send initialized from launch/attach, after mappings and the controller are ready.
 		return CompletableFuture.completedFuture( capabilities );
 	}
 
@@ -222,9 +220,24 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	public CompletableFuture<Void> attach( Map<String, Object> args ) {
 		// Create the future first so configurationDone can wait for it
 		CompletableFuture<Void> future = new CompletableFuture<>();
-		this.attachFuture = future;
+		synchronized ( exitLock ) {
+			if ( sessionCleaned || attachFuture != null || launchFuture != null ) {
+				return CompletableFuture.failedFuture( new IllegalStateException( "Session setup is already started or closed" ) );
+			}
+			this.attachFuture = future;
+			try {
+				configureDebugSettings( args );
+			} catch ( Exception error ) {
+				performSessionCleanup( error );
+				return future;
+			}
+		}
+		future.orTimeout( 30, java.util.concurrent.TimeUnit.SECONDS ).whenComplete( ( value, error ) -> {
+			if ( error != null )
+				performSessionCleanup( error );
+		} );
 
-		CompletableFuture.runAsync( () -> {
+		runSetup( () -> {
 			try {
 				if ( vm != null ) {
 					LOGGER.warning( "Attach requested but VM already present" );
@@ -238,126 +251,168 @@ public class BoxDebugServer implements IDebugProtocolServer {
 				    : ( int ) Double.parseDouble( portVal.toString() );
 
 				if ( serverName.isEmpty() && port == 0 ) {
-					LOGGER.warning( "Attach requested but neither serverName nor serverPort is provided" );
-					future.complete( null );
-					return;
+					throw new IllegalArgumentException( "Attach requires serverName or serverPort" );
 				}
 
-				configureDebugSettings( args );
+				if ( port < 0 || port > 65535 )
+					throw new IllegalArgumentException( "Invalid JDWP port: " + port );
 
-				try {
-					if ( port > 0 ) {
-						this.vmConnection = new ortus.boxlang.bxdebugger.vm.BareJDWPConnection( "localhost", port );
-					} else {
-						this.vmConnection = new ortus.boxlang.bxdebugger.vm.CommandBoxConnection( serverName );
+				IVMConnection	connection	= openAttachConnection( serverName, port );
+				VirtualMachine	connected	= connection.getVirtualMachine();
+				synchronized ( exitLock ) {
+					if ( sessionCleaned || future.isDone() ) {
+						connected.dispose();
+						return;
 					}
-					this.vm = vmConnection.getVirtualMachine();
-				} catch ( Exception e ) {
-					LOGGER.severe( "Failed to attach to VM: " + e.getMessage() );
-					e.printStackTrace();
-					sendOutput( "Error: Failed to attach to VM: " + e.getMessage(), "stderr" );
+					this.vmConnection	= connection;
+					this.vm				= connected;
+
+					// Initialize breakpoint manager
+					if ( vmController == null ) {
+						vmController = new VMController( vm, client );
+						vmController.setSessionStartTime( sessionStartTime );
+					} else {
+						// If you want to migrate pending breakpoints (mirrors launch logic)
+						VMController old = vmController;
+						vmController = new VMController( old, vm, client );
+						LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
+					}
+					dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
+
+					// Start event processing so we can catch ClassPrepareEvents for breakpoints
+					vmController.setTerminationHandler( () -> targetExited( connected ) );
+					vmController.startEventProcessing();
+
+					// When attaching to an already-running VM, the DebuggerUtil class may have
+					// already been loaded (we won't receive a ClassPrepareEvent for it).
+					// Proactively detect and initialize the DebuggerUtil.
+					if ( !vmController.detectDebuggerUtilOnAttach() ) {
+						LOGGER.warning( "DebuggerUtil not detected - variable evaluation may not work. "
+						    + "Ensure BoxLang is started with debugMode=true (--debug flag for miniserver)" );
+						sendOutput( "Warning: DebuggerUtil not detected. Variable evaluation may not work. "
+						    + "Ensure BoxLang is started with debugMode=true.", "stderr" );
+					}
+
+					// Configure path mapping for remote debugging support
+					if ( pathMappingService != null ) {
+						vmController.setPathMappingService( pathMappingService );
+					}
+
+					startOutputMonitoring(); // may be a no-op if remote
+
+					LOGGER.info( "Attach completed successfully, VM is ready" );
+					if ( client != null )
+						client.initialized();
 					future.complete( null );
-					return;
 				}
-
-				// Initialize breakpoint manager
-				if ( vmController == null ) {
-					vmController = new VMController( vm, client );
-					vmController.setSessionStartTime( sessionStartTime );
-				} else {
-					// If you want to migrate pending breakpoints (mirrors launch logic)
-					VMController old = vmController;
-					vmController = new VMController( old, vm, client );
-					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
-				}
-				dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
-
-				// Start event processing so we can catch ClassPrepareEvents for breakpoints
-				vmController.startEventProcessing();
-
-				// When attaching to an already-running VM, the DebuggerUtil class may have
-				// already been loaded (we won't receive a ClassPrepareEvent for it).
-				// Proactively detect and initialize the DebuggerUtil.
-				if ( !vmController.detectDebuggerUtilOnAttach() ) {
-					LOGGER.warning( "DebuggerUtil not detected - variable evaluation may not work. "
-					    + "Ensure BoxLang is started with debugMode=true (--debug flag for miniserver)" );
-					sendOutput( "Warning: DebuggerUtil not detected. Variable evaluation may not work. "
-					    + "Ensure BoxLang is started with debugMode=true.", "stderr" );
-				}
-
-				// Configure path mapping for remote debugging support
-				if ( pathMappingService != null ) {
-					vmController.setPathMappingService( pathMappingService );
-				}
-
-				startOutputMonitoring(); // may be a no-op if remote
-
-				LOGGER.info( "Attach completed successfully, VM is ready" );
-				future.complete( null );
 			} catch ( Exception e ) {
 				LOGGER.severe( "Attach failed with exception: " + e.getMessage() );
 				e.printStackTrace();
-				future.completeExceptionally( e );
+				performSessionCleanup( e );
 			}
 		} );
 
 		return future;
 	}
 
+	private void runSetup( Runnable task ) {
+		synchronized ( exitLock ) {
+			if ( !sessionCleaned )
+				setupExecutor.submit( task );
+		}
+	}
+
+	// Native connection boundary, also used by deterministic cancellation tests.
+	IVMConnection openAttachConnection( String serverName, int port ) throws Exception {
+		return port > 0 ? new ortus.boxlang.bxdebugger.vm.BareJDWPConnection( "localhost", port )
+		    : new ortus.boxlang.bxdebugger.vm.CommandBoxConnection( serverName );
+	}
+
 	@Override
 	public CompletableFuture<Void> launch( Map<String, Object> args ) {
 		// Create a future to track when launch is complete
 		// configurationDone will wait for this to ensure VM is ready
-		CompletableFuture<Void> future = CompletableFuture.supplyAsync( () -> {
+		CompletableFuture<Void> future = new CompletableFuture<>();
+		synchronized ( exitLock ) {
+			if ( sessionCleaned || attachFuture != null || launchFuture != null ) {
+				return CompletableFuture.failedFuture( new IllegalStateException( "Session setup is already started or closed" ) );
+			}
+			launchFuture = future;
+			try {
+				configureDebugSettings( args );
+			} catch ( Exception error ) {
+				performSessionCleanup( error );
+				return future;
+			}
+		}
+		future.orTimeout( 30, java.util.concurrent.TimeUnit.SECONDS ).whenComplete( ( value, error ) -> {
+			if ( error != null )
+				performSessionCleanup( error );
+		} );
+		runSetup( () -> {
 			try {
 				String program = ( String ) args.get( "program" );
+				if ( program == null || program.isBlank() || !java.nio.file.Files.isRegularFile( Paths.get( program ) ) ) {
+					throw new IllegalArgumentException( "Launch requires an existing program file" );
+				}
 				LOGGER.info( "Launching BoxLang program with JDI: " + program );
 				LOGGER.fine( "[TIMING] Launch request at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
 
-				configureDebugSettings( args );
+				IVMConnection	connection	= new ortus.boxlang.bxdebugger.vm.LaunchedConnection( program );
+				VirtualMachine	connected	= connection.getVirtualMachine();
+				synchronized ( exitLock ) {
+					if ( sessionCleaned || future.isDone() ) {
+						try {
+							connected.exit( 0 );
+						} finally {
+							connected.dispose();
+						}
+						return;
+					}
+					this.vmConnection	= connection;
+					this.vm				= connected;
 
-				this.vmConnection	= new ortus.boxlang.bxdebugger.vm.LaunchedConnection( program );
-				this.vm				= vmConnection.getVirtualMachine();
+					// Initialize or update breakpoint manager with the VM BEFORE starting output monitoring
+					// This sets up ClassPrepareRequest before the VM is resumed
+					if ( vmController == null ) {
+						vmController = new VMController( vm, client );
+						vmController.setSessionStartTime( sessionStartTime );
+					} else {
+						// Transfer pending breakpoints to a new manager with the VM
+						VMController old = vmController;
+						vmController = new VMController( old, vm, client );
+						LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
+					}
+					dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
 
-				// Initialize or update breakpoint manager with the VM BEFORE starting output monitoring
-				// This sets up ClassPrepareRequest before the VM is resumed
-				if ( vmController == null ) {
-					vmController = new VMController( vm, client );
-					vmController.setSessionStartTime( sessionStartTime );
-				} else {
-					// Transfer pending breakpoints to a new manager with the VM
-					VMController old = vmController;
-					vmController = new VMController( old, vm, client );
-					LOGGER.info( "Transferred pending breakpoints to VM-enabled breakpoint manager" );
+					// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
+					vmController.setTerminationHandler( () -> targetExited( connected ) );
+					vmController.startEventProcessing();
+
+					// Note: The DebuggerUtil will be started automatically when its class is loaded
+					// via the ClassPrepareEvent handler in VMController. We no longer need to call
+					// startDebuggerUtil here because the class may not be loaded yet at this point.
+
+					// Start output monitoring after VM is resumed
+					startOutputMonitoring();
+
+					// Configure path mapping for remote debugging support
+					if ( pathMappingService != null ) {
+						vmController.setPathMappingService( pathMappingService );
+					}
+
+					LOGGER.info( "Launch completed successfully, VM is ready" );
+					if ( client != null )
+						client.initialized();
+					future.complete( null );
 				}
-				dumpRequestHandler = new DumpRequestHandler( vmController, client, dumpExpressionParser, dumpTop );
-
-				// Start event processing BEFORE resuming the VM so we can catch ClassPrepareEvents
-				vmController.startEventProcessing();
-
-				// Note: The DebuggerUtil will be started automatically when its class is loaded
-				// via the ClassPrepareEvent handler in VMController. We no longer need to call
-				// startDebuggerUtil here because the class may not be loaded yet at this point.
-
-				// Start output monitoring after VM is resumed
-				startOutputMonitoring();
-
-				// Configure path mapping for remote debugging support
-				if ( pathMappingService != null ) {
-					vmController.setPathMappingService( pathMappingService );
-				}
-
-				LOGGER.info( "Launch completed successfully, VM is ready" );
-				return null;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Failed to launch program: " + e.getMessage() );
 				e.printStackTrace();
-				sendOutput( "Error: Failed to launch program: " + e.getMessage(), "stderr" );
-				throw new RuntimeException( "Launch failed", e );
+				performSessionCleanup( e );
 			}
 		} );
 
-		this.launchFuture = future;
 		return future;
 	}
 
@@ -374,7 +429,11 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			return;
 		}
 		if ( outputMonitorExecutor == null ) {
-			outputMonitorExecutor = Executors.newFixedThreadPool( 2 );
+			outputMonitorExecutor = Executors.newFixedThreadPool( 2, task -> {
+				Thread thread = new Thread( task, "DebuggeeOutput" );
+				thread.setDaemon( true );
+				return thread;
+			} );
 		}
 		Process process = vm.process();
 		outputMonitorExecutor.submit( () -> monitorOutputStream( process.getInputStream(), "stdout" ) );
@@ -386,36 +445,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Start monitoring the debugged process for exit events
 	 */
 	private void startProcessMonitoring() {
-		if ( vm != null && vm.process() != null ) {
-			Process process = vm.process();
+		VirtualMachine target = vm;
+		if ( target != null && target.process() != null ) {
+			target.process().onExit().thenRun( () -> targetExited( target ) );
+		}
+	}
 
-			// Monitor process termination in a separate thread
-			if ( outputMonitorExecutor == null ) {
-				outputMonitorExecutor = Executors.newFixedThreadPool( 3 ); // Increased for process monitoring
-			}
-
-			outputMonitorExecutor.submit( () -> {
-				try {
-					LOGGER.info( "Starting process exit monitoring" );
-					int exitCode = process.waitFor();
-					LOGGER.info( "Debugged process exited with code: " + exitCode );
-
-					// Handle the program exit
-					handleProgramExit( exitCode );
-
-				} catch ( InterruptedException e ) {
-					Thread.currentThread().interrupt();
-					LOGGER.info( "Process monitoring interrupted" );
-					// If interrupted, assume abnormal termination
-					handleProgramExit( -1 );
-				} catch ( Exception e ) {
-					LOGGER.severe( "Error monitoring process exit: " + e.getMessage() );
-					// On error, assume abnormal termination
-					handleProgramExit( -1 );
-				}
-			} );
-		} else {
-			LOGGER.warning( "Cannot start process monitoring - VM or process is null" );
+	private void targetExited( VirtualMachine target ) {
+		synchronized ( exitLock ) {
+			if ( sessionCleaned || vm != target )
+				return;
+			Process process = target.process();
+			handleProgramExit( process != null && !process.isAlive() ? process.exitValue() : 0 );
 		}
 	}
 
@@ -427,7 +468,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		try ( BufferedReader reader = new BufferedReader( new InputStreamReader( inputStream ) ) ) {
 			String line;
 			while ( ( line = reader.readLine() ) != null ) {
-				LOGGER.info( "Output from " + category + ": " + line );
+				LOGGER.fine( "Output from " + category + ": " + line );
 				sendOutput( line, category );
 			}
 			LOGGER.info( "Monitor for " + category + " stream ended (stream closed)" );
@@ -437,6 +478,8 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	}
 
 	private void sendOutput( String message, String category ) {
+		if ( sessionCleaned || client == null )
+			return;
 		if ( client == null ) {
 			return;
 		}
@@ -445,7 +488,7 @@ public class BoxDebugServer implements IDebugProtocolServer {
 		outputEvent.setOutput( message + System.lineSeparator() );
 		outputEvent.setCategory( category );
 
-		LOGGER.info( "Sending output event: " + message );
+		LOGGER.fine( "Sending output event: " + message );
 		client.output( outputEvent );
 	}
 
@@ -465,83 +508,91 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	public CompletableFuture<SetBreakpointsResponse> setBreakpoints( SetBreakpointsArguments args ) {
 		// Apply replacements at receipt so deferred tasks cannot reorder requests for the same source.
 		return CompletableFuture.completedFuture( null ).thenApply( ignored -> {
-			SetBreakpointsResponse	response			= new SetBreakpointsResponse();
-			List<Breakpoint>		responseBreakpoints	= new ArrayList<>();
+			synchronized ( exitLock ) {
+				if ( sessionCleaned )
+					throw new IllegalStateException( "Debug session has ended" );
+				SetBreakpointsResponse	response			= new SetBreakpointsResponse();
+				List<Breakpoint>		responseBreakpoints	= new ArrayList<>();
 
-			// Initialize breakpoint manager if not yet available (before launch)
-			if ( vmController == null ) {
-				// Create a temporary breakpoint manager for pending breakpoint storage
-				// This will be replaced with a proper one when launch() is called
-				vmController = new VMController( null, client );
-				vmController.setSessionStartTime( sessionStartTime );
-				LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
+				// Initialize breakpoint manager if not yet available (before launch)
+				if ( vmController == null ) {
+					// Create a temporary breakpoint manager for pending breakpoint storage
+					// This will be replaced with a proper one when launch() is called
+					vmController = new VMController( null, client );
+					vmController.setSessionStartTime( sessionStartTime );
+					LOGGER.info( "Created temporary breakpoint manager for pending breakpoints" );
+				}
+
+				// Initialize path mapping if not yet available
+				if ( pathMappingService == null ) {
+					pathMappingService = new PathMappingService( null, null, null );
+				}
+
+				// Get the original local path for the response (client's path)
+				String	localPath		= args.getSource() != null ? args.getSource().getPath() : null;
+
+				// Translate to remote path for the debuggee
+				String	remotePath		= localPath != null ? pathMappingService.toRemotePath( localPath ) : null;
+
+				// Create a source with the remote path for the VMController
+				Source	remoteSource	= new Source();
+				if ( args.getSource() != null ) {
+					remoteSource.setName( args.getSource().getName() );
+					remoteSource.setPath( remotePath );
+					remoteSource.setSourceReference( args.getSource().getSourceReference() );
+				}
+
+				vmController.setPathMappingService( pathMappingService );
+				for ( Breakpoint breakpoint : vmController.replaceSourceBreakpoints( remoteSource, args.getBreakpoints() ) ) {
+					breakpoint.getSource().setPath( localPath );
+					responseBreakpoints.add( breakpoint );
+				}
+
+				response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
+
+				return response;
 			}
-
-			// Initialize path mapping if not yet available
-			if ( pathMappingService == null ) {
-				pathMappingService = new PathMappingService( null, null, null );
-			}
-
-			// Get the original local path for the response (client's path)
-			String	localPath		= args.getSource() != null ? args.getSource().getPath() : null;
-
-			// Translate to remote path for the debuggee
-			String	remotePath		= localPath != null ? pathMappingService.toRemotePath( localPath ) : null;
-
-			// Create a source with the remote path for the VMController
-			Source	remoteSource	= new Source();
-			if ( args.getSource() != null ) {
-				remoteSource.setName( args.getSource().getName() );
-				remoteSource.setPath( remotePath );
-				remoteSource.setSourceReference( args.getSource().getSourceReference() );
-			}
-
-			vmController.setPathMappingService( pathMappingService );
-			for ( Breakpoint breakpoint : vmController.replaceSourceBreakpoints( remoteSource, args.getBreakpoints() ) ) {
-				breakpoint.getSource().setPath( localPath );
-				responseBreakpoints.add( breakpoint );
-			}
-
-			response.setBreakpoints( responseBreakpoints.toArray( new Breakpoint[ 0 ] ) );
-
-			return response;
 		} );
 	}
 
 	@Override
 	public CompletableFuture<SetExceptionBreakpointsResponse> setExceptionBreakpoints( SetExceptionBreakpointsArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			LOGGER.info( "SetExceptionBreakpoints request received" );
+		return CompletableFuture.completedFuture( args ).thenApply( request -> {
+			synchronized ( exitLock ) {
+				if ( sessionCleaned )
+					throw new IllegalStateException( "Debug session has ended" );
+				LOGGER.info( "SetExceptionBreakpoints request received" );
 
-			SetExceptionBreakpointsResponse response = new SetExceptionBreakpointsResponse();
+				SetExceptionBreakpointsResponse response = new SetExceptionBreakpointsResponse();
 
-			// Initialize VM controller if not yet available (before launch)
-			if ( vmController == null ) {
-				vmController = new VMController( null, client );
-				LOGGER.info( "Created temporary VMController for exception breakpoints" );
-			}
+				// Initialize VM controller if not yet available (before launch)
+				if ( vmController == null ) {
+					vmController = new VMController( null, client );
+					LOGGER.info( "Created temporary VMController for exception breakpoints" );
+				}
 
-			// Check if "caught" and/or "uncaught" filters are enabled
-			String[]	filters			= args.getFilters();
-			boolean		caughtEnabled	= false;
-			boolean		uncaughtEnabled	= false;
+				// Check if "caught" and/or "uncaught" filters are enabled
+				String[]	filters			= args.getFilters();
+				boolean		caughtEnabled	= false;
+				boolean		uncaughtEnabled	= false;
 
-			if ( filters != null ) {
-				for ( String filter : filters ) {
-					if ( "caught".equals( filter ) ) {
-						caughtEnabled = true;
-					} else if ( "uncaught".equals( filter ) ) {
-						uncaughtEnabled = true;
+				if ( filters != null ) {
+					for ( String filter : filters ) {
+						if ( "caught".equals( filter ) ) {
+							caughtEnabled = true;
+						} else if ( "uncaught".equals( filter ) ) {
+							uncaughtEnabled = true;
+						}
 					}
 				}
+
+				// Configure exception breakpoints in VMController
+				vmController.setExceptionBreakpoints( caughtEnabled, uncaughtEnabled );
+
+				LOGGER.info( "Exception breakpoints configured: caught=" + caughtEnabled + ", uncaught=" + uncaughtEnabled );
+
+				return response;
 			}
-
-			// Configure exception breakpoints in VMController
-			vmController.setExceptionBreakpoints( caughtEnabled, uncaughtEnabled );
-
-			LOGGER.info( "Exception breakpoints configured: caught=" + caughtEnabled + ", uncaught=" + uncaughtEnabled );
-
-			return response;
 		} );
 	}
 
@@ -871,11 +922,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Perform cleanup
 			performSessionCleanup();
 
-			// Exit the current process after handling the debuggee's exit
-			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
-			if ( !falseExit ) {
-				System.exit( 0 );
-			}
 		}
 	}
 
@@ -891,6 +937,12 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			}
 
 			LOGGER.info( "Handling user-initiated termination" );
+			if ( vm != null ) {
+				try {
+					vm.exit( 0 );
+				} catch ( com.sun.jdi.VMDisconnectedException ignored ) {
+				}
+			}
 
 			// Send terminated event
 			sendTerminatedEvent();
@@ -898,11 +950,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			// Perform cleanup
 			performSessionCleanup();
 
-			// Exit the current process after handling the debuggee's exit
-			LOGGER.info( "Debuggee has exited, shutting down debugger process" );
-			if ( !falseExit ) {
-				System.exit( 0 );
-			}
 		}
 	}
 
@@ -941,10 +988,25 @@ public class BoxDebugServer implements IDebugProtocolServer {
 	 * Perform cleanup of debug session resources
 	 */
 	private void performSessionCleanup() {
+		performSessionCleanup( new IllegalStateException( "Debug session ended during setup" ) );
+	}
+
+	private void performSessionCleanup( Throwable reason ) {
+		synchronized ( exitLock ) {
+			cleanupSession( reason );
+		}
+	}
+
+	private void cleanupSession( Throwable reason ) {
 		if ( sessionCleaned ) {
 			return;
 		}
 
+		sessionCleaned = true;
+		if ( attachFuture != null )
+			attachFuture.completeExceptionally( reason );
+		if ( launchFuture != null )
+			launchFuture.completeExceptionally( reason );
 		LOGGER.info( "Performing debug session cleanup" );
 
 		try {
@@ -955,26 +1017,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 
 			// Shutdown output monitoring
 			if ( outputMonitorExecutor != null && !outputMonitorExecutor.isShutdown() ) {
+				// Do not interrupt a reader while it is writing a DAP event; close its process stream below.
 				outputMonitorExecutor.shutdown();
-				try {
-					if ( !outputMonitorExecutor.awaitTermination( 5, java.util.concurrent.TimeUnit.SECONDS ) ) {
-						outputMonitorExecutor.shutdownNow();
-					}
-				} catch ( InterruptedException e ) {
-					Thread.currentThread().interrupt();
-					outputMonitorExecutor.shutdownNow();
-				}
 			}
 
 			// Clean up VM
 			if ( vm != null ) {
 				try {
-					if ( !vm.process().isAlive() ) {
-						// Process is already dead, just dispose
-						vm.dispose();
-					} else {
-						// Try graceful exit first
-						vm.exit( 0 );
+					Process process = vm.process();
+					vm.dispose(); // Cleanup releases ownership; only explicit termination kills the target.
+					if ( process != null ) {
+						process.getInputStream().close();
+						process.getErrorStream().close();
 					}
 				} catch ( Exception e ) {
 					LOGGER.warning( "Error during VM cleanup: " + e.getMessage() );
@@ -999,60 +1053,43 @@ public class BoxDebugServer implements IDebugProtocolServer {
 			e.printStackTrace();
 			// Ensure we still mark as cleaned even if cleanup partially failed
 			sessionCleaned = true;
+		} finally {
+			setupExecutor.shutdownNow();
 		}
 	}
 
 	@Override
 	public CompletableFuture<Void> configurationDone( org.eclipse.lsp4j.debug.ConfigurationDoneArguments args ) {
-		return CompletableFuture.supplyAsync( () -> {
+		CompletableFuture<Void> setup;
+		synchronized ( exitLock ) {
+			setup = launchFuture != null ? launchFuture : ( attachFuture != null ? attachFuture : CompletableFuture.completedFuture( null ) );
+		}
+		return setup.thenRun( () -> {
+			synchronized ( exitLock ) {
+				if ( sessionCleaned )
+					throw new IllegalStateException( "Debug session has ended" );
+				LOGGER.info( "Configuration done request received" );
 
-			LOGGER.info( "Configuration done request received" );
-			LOGGER.fine( "[TIMING] ConfigurationDone at T+" + ( System.currentTimeMillis() - sessionStartTime ) + "ms" );
+				// Set actual breakpoints for all pending breakpoints
+				verifyAndSetPendingBreakpoints();
 
-			// Wait for launch or attach to complete before processing configurationDone
-			// This ensures the VM is ready before we try to set breakpoints
-			if ( launchFuture != null ) {
-				try {
-					LOGGER.info( "Waiting for launch to complete before processing configurationDone..." );
-					launchFuture.get( 30, java.util.concurrent.TimeUnit.SECONDS );
-					LOGGER.info( "Launch completed, continuing with configurationDone" );
-				} catch ( Exception e ) {
-					LOGGER.severe( "Failed waiting for launch to complete: " + e.getMessage() );
-					// Continue anyway - the VM might be available
+				// Start breakpoint event processing (idempotent if already started)
+				if ( vmController != null )
+					vmController.startEventProcessing();
+
+				// Start output monitoring using the VM's process
+				startOutputMonitoring();
+
+				startProcessMonitoring();
+
+				// Signal to VMController that configuration is complete
+				// This allows the VM to be resumed if it was waiting
+				if ( vmController != null ) {
+					vmController.signalConfigurationDone();
 				}
+
+				LOGGER.info( "Configuration done request completed successfully" );
 			}
-			if ( attachFuture != null ) {
-				try {
-					LOGGER.info( "Waiting for attach to complete before processing configurationDone..." );
-					attachFuture.get( 30, java.util.concurrent.TimeUnit.SECONDS );
-					LOGGER.info( "Attach completed, continuing with configurationDone" );
-				} catch ( Exception e ) {
-					LOGGER.severe( "Failed waiting for attach to complete: " + e.getMessage() );
-					// Continue anyway - the VM might be available
-				}
-			}
-
-			// Set actual breakpoints for all pending breakpoints
-			verifyAndSetPendingBreakpoints();
-
-			// Start breakpoint event processing (idempotent if already started)
-			vmController.startEventProcessing();
-
-			// Start output monitoring using the VM's process
-			startOutputMonitoring();
-
-			// Mark session as active and start process monitoring
-			sessionCleaned = false;
-			startProcessMonitoring();
-
-			// Signal to VMController that configuration is complete
-			// This allows the VM to be resumed if it was waiting
-			if ( vmController != null ) {
-				vmController.signalConfigurationDone();
-			}
-
-			LOGGER.info( "Configuration done request completed successfully" );
-			return null;
 		} );
 	}
 
@@ -1105,8 +1142,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 						dapThreads.add( dapThread );
 
 						LOGGER.fine( "Added thread: ID=" + dapThread.getId() + ", Name=" + dapThread.getName() );
-						// Emit names at INFO to help diagnose presence of our exec thread during tests
-						LOGGER.info( "Thread present: ID=" + dapThread.getId() + ", Name='" + dapThread.getName() + "'" );
 
 					} catch ( Exception e ) {
 						LOGGER.warning( "Error processing thread " + jdiThread.uniqueID() + ": " + e.getMessage() );
@@ -1170,9 +1205,6 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					// We perform cleanup and rely on a subsequent initialize/launch from client.
 					sendTerminatedEvent();
 					performSessionCleanup();
-					if ( !falseExit ) {
-						System.exit( 0 );
-					}
 					return null;
 				}
 
@@ -1200,47 +1232,18 @@ public class BoxDebugServer implements IDebugProtocolServer {
 					handleProgramExit( exitCode );
 				} else {
 					// Detach scenario: leave program running, do not send exited; send terminated and cleanup
-					detachFromDebuggee();
 					sendTerminatedEvent();
 					performSessionCleanup();
-					if ( !falseExit ) {
-						System.exit( 0 );
-					}
 				}
 
 				return null;
 			} catch ( Exception e ) {
 				LOGGER.severe( "Error handling disconnect request: " + e.getMessage() );
 				// Best-effort cleanup to avoid leaked state
-				try {
-					detachFromDebuggee();
-				} catch ( Exception ignore ) {
-				}
 				performSessionCleanup();
 				return null;
 			}
 		} );
-	}
-
-	/**
-	 * Detach from the running debuggee without terminating it.
-	 */
-	private void detachFromDebuggee() {
-		if ( vm != null ) {
-			try {
-				if ( vm.process() != null && vm.process().isAlive() ) {
-					// No direct JDI detach for LaunchingConnector VMs; best effort is to not kill the process
-					// and avoid vm.exit(). Dispose JDI connection so program continues.
-					vm.dispose();
-				} else {
-					vm.dispose();
-				}
-			} catch ( Exception e ) {
-				LOGGER.warning( "Error detaching from debuggee: " + e.getMessage() );
-			} finally {
-				vm = null;
-			}
-		}
 	}
 
 	/**

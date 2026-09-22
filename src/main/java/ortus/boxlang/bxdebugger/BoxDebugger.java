@@ -144,10 +144,10 @@ public class BoxDebugger {
 	}
 
 	private static void handleClient( SocketChannel clientSocket ) {
+		BoxDebugServer debugServer = new BoxDebugServer();
 		try {
 			LOGGER.info( "Creating debug server instance..." );
 			// Create the debug server instance
-			BoxDebugServer debugServer = new BoxDebugServer();
 			LOGGER.info( "Debug server instance created successfully" );
 			LOGGER.info( "Client socket open: " + clientSocket.isOpen() + ", connected: " + clientSocket.isConnected() );
 
@@ -198,6 +198,7 @@ public class BoxDebugger {
 			}
 			e.printStackTrace();
 		} finally {
+			debugServer.cleanup();
 			try {
 				clientSocket.close();
 				LOGGER.info( "Client disconnected" );
