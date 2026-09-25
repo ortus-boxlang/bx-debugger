@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-25
+
 - Improve variable dumps in REPL
 - Bump BoxLang version to 1.17.0
 - BLIDE-328 Fix CFC stack frames
@@ -34,6 +36,7 @@ Fixed
 
 - Stabilized output-related tests with polling and added JDI launch retries
 
-[unreleased]: https://github.com/ortus-boxlang/bx-debugger/compare/v1.1.1...HEAD
+[unreleased]: https://github.com/ortus-boxlang/bx-debugger/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ortus-boxlang/bx-debugger/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/ortus-boxlang/bx-debugger/compare/v1.0.0...v1.1.1
 [1.0.0]: https://github.com/ortus-boxlang/bx-debugger/compare/ae0ec3267d61aedac227a96d07f1e6eebeab58e6...v1.0.0
