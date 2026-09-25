@@ -14,7 +14,6 @@ import org.eclipse.lsp4j.debug.Capabilities;
 import org.eclipse.lsp4j.debug.InitializeRequestArguments;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -27,7 +26,7 @@ import org.junit.jupiter.api.Timeout;
 public class InitializedTest {
 
 	private static final int	TEST_PORT	= 9999;
-	private static final int	TIMEOUT		= 9999;
+	private static final int	TIMEOUT		= 30;
 
 	private Thread				debuggerThread;
 	private CountDownLatch		serverStartupLatch;
@@ -50,7 +49,6 @@ public class InitializedTest {
 	@Test
 	@Timeout( value = TIMEOUT, unit = TimeUnit.SECONDS )
 	@DisplayName( "Test initialized event sent after capabilities" )
-	@Disabled( "This test is hanging and needs investigation. I think this functionality is coverd by FullDebugSessionTest. We may be able to remove this one." )
 	public void testSendsInitialized() throws Exception {
 		// Wait for server to start
 		assertTrue( serverStartupLatch.await( TIMEOUT, TimeUnit.SECONDS ), "Server should signal startup" );
@@ -71,9 +69,14 @@ public class InitializedTest {
 				CompletableFuture<Capabilities>	initResponse	= server.initialize( initArgs );
 				Capabilities					capabilities	= initResponse.get( TIMEOUT, TimeUnit.SECONDS );
 
-				client.waitForInitializedEvent().get( TIMEOUT, TimeUnit.SECONDS );
-
 				assertThat( capabilities ).isNotNull();
+				assertTrue( capabilities.getSupportsLogPoints() );
+				assertTrue( !client.waitForInitializedEvent().isDone(), "Initialization waits for session setup" );
+				server.launch( java.util.Map.of( "program", breakpointFile.toString() ) ).get( TIMEOUT, TimeUnit.SECONDS );
+				client.waitForInitializedEvent().get( TIMEOUT, TimeUnit.SECONDS );
+				var disconnect = new org.eclipse.lsp4j.debug.DisconnectArguments();
+				disconnect.setTerminateDebuggee( true );
+				server.disconnect( disconnect ).get( 2, TimeUnit.SECONDS );
 			} catch ( Exception e ) {
 				fail( e );
 			}

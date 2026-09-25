@@ -7,7 +7,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -18,6 +18,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.logging.Logger;
 
 import org.eclipse.lsp4j.debug.Breakpoint;
+import org.eclipse.lsp4j.debug.ContinuedEventArguments;
 import org.eclipse.lsp4j.debug.OutputEventArguments;
 import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.SourceBreakpoint;
@@ -61,42 +62,72 @@ import ortus.boxlang.runtime.util.FQN;
  */
 public class VMController {
 
-	private static final Logger LOGGER = Logger.getLogger( VMController.class.getName() );
+	private static final Logger	LOGGER				= Logger.getLogger( VMController.class.getName() );
 
-	/**
-	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
-	 *
-	 * @param message The error message to log
-	 */
-	private static void fatalError( String message ) {
-		LOGGER.severe( "FATAL: " + message );
-		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
-		System.exit( 1 );
+	private Runnable			terminationHandler	= () -> {
+													};
+
+	public void setTerminationHandler( Runnable handler ) {
+		terminationHandler = handler;
+	}
+
+	private void targetTerminated() {
+		stopEventProcessing();
+		terminationHandler.run();
+	}
+
+	final Object											invocationLock		= new Object();
+	private final java.util.concurrent.ExecutorService		invocationExecutor	= java.util.concurrent.Executors.newSingleThreadExecutor( task -> {
+																					Thread thread = new Thread( task, "DebuggerInvocation" );
+																					thread.setDaemon( true );
+																					return thread;
+																				} );
+	private final java.util.concurrent.ExecutorService		decisionExecutor	= java.util.concurrent.Executors.newSingleThreadExecutor( task -> {
+																					Thread thread = new Thread( task, "BreakpointDecision" );
+																					thread.setDaemon( true );
+																					return thread;
+																				} );
+	private final java.util.Set<CompletableFuture<Value>>	invocations			= ConcurrentHashMap.newKeySet();
+
+	CompletableFuture<Value> submitInvocation( java.util.function.Supplier<Value> action ) {
+		synchronized ( invocations ) {
+			if ( invocationExecutor.isShutdown() )
+				return CompletableFuture.failedFuture( new IllegalStateException( "Debug session has ended" ) );
+			// Expansion callbacks can enqueue and join more helper calls; complete them off the serial invocation lane.
+			CompletableFuture<Value> future = CompletableFuture.supplyAsync( action, invocationExecutor )
+			    .whenCompleteAsync( ( value, error ) -> {
+			    } );
+			invocations.add( future );
+			future.whenComplete( ( value, error ) -> invocations.remove( future ) );
+			return future;
+		}
 	}
 
 	public final VirtualMachine												vm;
 	private final IDebugProtocolClient										client;
+	// ponytail: retain generated-class mirrors for this session; evict unloaded mirrors if reload volume warrants it.
+	private final java.util.Set<ReferenceType>								breakpointClasses				= new java.util.HashSet<>();
+	private boolean															breakpointClassesDiscovered;
 	private final List<BreakpointRequest>									activeBreakpoints				= new CopyOnWriteArrayList<>();
-	private final List<PendingBreakpointInfo>								pendingBreakpoints				= new CopyOnWriteArrayList<>();
 	private volatile boolean												eventProcessingActive			= false;
 	private Thread															eventProcessingThread;
 
 	// DAP-level breakpoint storage - organized by file path
 	private final Map<String, List<PendingBreakpoint>>						pendingBreakpointsByFile		= new ConcurrentHashMap<>();
 	private final Map<Integer, PendingBreakpoint>							pendingBreakpointsById			= new ConcurrentHashMap<>();
-	private int																breakpointIdCounter				= 1;
+	private final AtomicInteger												breakpointIdCounter				= new AtomicInteger();
 
-	private final Map<Integer, BreakpointContext>							breakPointContexts				= new WeakHashMap<>();
+	private final Map<Long, BreakpointContext>								breakPointContexts				= new ConcurrentHashMap<>();
+	// Serializes stop publication/resume only; never hold this across expression evaluation.
+	private final Object													stopLock						= new Object();
 
 	private MethodEntryRequest												methodEntryRequest				= null;
 	private final ConcurrentLinkedQueue<CompletableFuture<ThreadReference>>	debugThreadAccessQueue			= new ConcurrentLinkedQueue<>();
 	private Map<Long, StepRequest>											stepRequests					= new ConcurrentHashMap<>();
-	private Map<Long, EventSet>												eventSets						= new ConcurrentHashMap<>();
 
 	private MethodEntryRequest												methodEntryRequestDebugger		= null;
-	private CompletableFuture<Void>											debugFuture						= null;
-	private ThreadReference													debugThread						= null;
+	private volatile CompletableFuture<Void>								debugFuture						= null;
+	private volatile ThreadReference										debugThread						= null;
 
 	// Exception breakpoint support
 	private static final String												BOX_RUNTIME_EXCEPTION_CLASS		= "ortus.boxlang.runtime.types.exceptions.BoxRuntimeException";
@@ -125,14 +156,13 @@ public class VMController {
 	// Path mapping service for remote debugging support
 	private PathMappingService												pathMappingService				= null;
 
-	// Verified breakpoints storage - keeps track of breakpoints that have been successfully set
-	// This allows re-applying breakpoints when BoxLang recompiles a class
+	// Retained logical definitions, including unresolved requests, for class preparation/recompilation.
+	// Client-visible verification comes from actual active JDI bindings, not membership in this map.
 	private final Map<Integer, VerifiedBreakpointInfo>						verifiedBreakpoints				= new ConcurrentHashMap<>();
 
 	// Flag to track whether configurationDone has been called
 	// VM should not resume until this is true
 	private volatile boolean												configurationDone				= false;
-	private volatile boolean												vmStartEventReceived			= false;
 	// Store the VMStartEvent's eventSet so we can resume it when configurationDone is called
 	private volatile EventSet												vmStartEventSet					= null;
 	// Session start time for timing instrumentation
@@ -300,32 +330,6 @@ public class VMController {
 		}
 	}
 
-	/**
-	 * Information about a breakpoint that couldn't be set yet because the class isn't loaded
-	 */
-	private static class PendingBreakpointInfo {
-
-		final String	filePath;
-		final int		lineNumber;
-		final int		breakpointId;
-		final String	condition;
-		final String	hitCondition;
-		final String	logMessage;
-
-		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId ) {
-			this( filePath, lineNumber, breakpointId, null, null, null );
-		}
-
-		PendingBreakpointInfo( String filePath, int lineNumber, int breakpointId, String condition, String hitCondition, String logMessage ) {
-			this.filePath		= filePath;
-			this.lineNumber		= lineNumber;
-			this.breakpointId	= breakpointId;
-			this.condition		= condition;
-			this.hitCondition	= hitCondition;
-			this.logMessage		= logMessage;
-		}
-	}
-
 	public VMController( VirtualMachine vm, IDebugProtocolClient client ) {
 		this.vm		= vm;
 		this.client	= client;
@@ -341,8 +345,8 @@ public class VMController {
 		this.vm		= vm;
 		this.client	= client;
 
-		// Migrate existing breakpoints
-		this.activeBreakpoints.addAll( old.activeBreakpoints );
+		// Migrate logical requests only. JDI bindings belong to the old VM connection.
+		this.breakpointIdCounter.set( old.breakpointIdCounter.get() );
 
 		// Migrate pending breakpoints
 		if ( old.pendingBreakpointsByFile != null ) {
@@ -365,6 +369,13 @@ public class VMController {
 			setupMethodEntryRequest();
 		}
 
+	}
+
+	void retainInvocationResult( Value value ) {
+		synchronized ( stopLock ) {
+			// ponytail: helper intermediates belong to every active stop; use per-request ownership if overlapping-stop memory matters.
+			breakPointContexts.values().forEach( context -> context.getVariables().retain( value ) );
+		}
 	}
 
 	public CompletableFuture<Value> invokeStatic( String className, String methodName, List<String> paramTypes, List<Value> args ) {
@@ -391,11 +402,11 @@ public class VMController {
 		this.methodEntryRequestDebugger = vm.eventRequestManager().createMethodEntryRequest();
 		this.methodEntryRequestDebugger.addClassFilter( "ortus.boxlang.debug.DebuggerExternalConnectionUtil" );
 		this.methodEntryRequestDebugger.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+		CompletableFuture<Void> prepared = new CompletableFuture<>();
+		this.debugFuture = prepared;
 		this.methodEntryRequestDebugger.enable();
 		LOGGER.info( "Created method entry request for DebuggerUtil.debuggerHook()" );
-		this.debugFuture = new CompletableFuture<>();
-
-		return this.debugFuture;
+		return prepared;
 	}
 
 	public ThreadReference getPreparedDebugInvokeThread() {
@@ -420,20 +431,11 @@ public class VMController {
 			CompletableFuture<Void> future = pauseDebugThread();
 
 			// Wait for the MethodEntryEvent to fire (max 5 seconds - should happen within 100ms)
-			try {
-				future.get( 5, TimeUnit.SECONDS );
-			} catch ( TimeoutException e ) {
-				fatalError( "Timeout waiting for debug thread to suspend at MethodEntryEvent - DebuggerUtil may not be running" );
-				return null; // Unreachable, but satisfies compiler
-			} catch ( ExecutionException e ) {
-				fatalError( "Error waiting for debug thread suspension: " + e.getMessage() );
-				return null; // Unreachable, but satisfies compiler
-			}
+			future.get( 5, TimeUnit.SECONDS );
 
 			// debugThread is now set by handleMethodEntryEvent() and is properly suspended
 			if ( debugThread == null ) {
-				fatalError( "Debug thread not captured after MethodEntryEvent" );
-				return null; // Unreachable, but satisfies compiler
+				throw new IllegalStateException( "Debug thread not captured after MethodEntryEvent" );
 			}
 
 			// Ensure the worker thread is running to process queued tasks
@@ -443,12 +445,12 @@ public class VMController {
 			return debugThread;
 		} catch ( InterruptedException e ) {
 			Thread.currentThread().interrupt();
-			fatalError( "Interrupted while waiting for debug thread: " + e.getMessage() );
-		} catch ( Exception e ) {
-			fatalError( "Error preparing debug thread: " + e.getMessage() );
+			throw new java.util.concurrent.CompletionException( e );
+		} catch ( TimeoutException e ) {
+			throw new IllegalStateException( "Helper preparation timed out after 5 seconds; DebuggerUtil may not be running", e );
+		} catch ( ExecutionException e ) {
+			throw new java.util.concurrent.CompletionException( e.getCause() );
 		}
-
-		return null; // Unreachable, but satisfies compiler
 	}
 
 	/**
@@ -491,115 +493,59 @@ public class VMController {
 	}
 
 	public CompletableFuture<Value> evaluateExpressionInFrame( int frameId, String expression ) {
-		return getBreakpointContextbyStackFrame( frameId )
-		    .map( bpContext -> {
-			    try {
-
-				    ObjectReference context	= bpContext.getContext();
-				    ObjectReference runtime	= ( ObjectReference ) getRuntime().join();
-
-				    var			evalFuture	= InvokeTools.submitAndInvoke(
-				        this,
-				        runtime,
-				        "executeStatement",
-				        List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
-				        List.of( vm.mirrorOf( expression ), context )
-				    );
-
-				    return evalFuture;
-			    } catch ( Exception e ) {
-				    int i = 0;
-
-				    return null;
-			    }
-		    } )
-		    .orElseGet( () -> CompletableFuture.completedFuture( null ) );
+		return CompletableFuture.completedFuture( frameId ).thenCompose( id -> {
+			BreakpointContext	bpContext	= getBreakpointContextbyStackFrame( id )
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired stack frame " + id ) );
+			ObjectReference		context		= bpContext.getContext( id )
+			    .orElseThrow( () -> new IllegalStateException( "No BoxLang context for frame " + id ) );
+			return getRuntime().thenCompose( runtime -> InvokeTools.submitAndInvoke(
+			    this,
+			    ( ObjectReference ) runtime,
+			    "executeSource",
+			    List.of( "java.lang.String", "ortus.boxlang.runtime.context.IBoxContext" ),
+			    List.of( vm.mirrorOf( expression ), context )
+			) ).thenApply( value -> {
+				bpContext.checkActive();
+				return value;
+			} );
+		} );
 	}
 
 	public void stepThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
-		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_OVER );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
+		stepThread( ( int ) threadId, StepRequest.STEP_OVER, true );
 	}
 
 	public void stepInThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
-		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_INTO );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
+		stepThread( ( int ) threadId, StepRequest.STEP_INTO, true );
 	}
 
 	public void stepOutThread( long threadId ) {
-		if ( stepRequests.containsKey( threadId ) ) {
-			var oldReq = stepRequests.remove( threadId );
-			oldReq.disable();
-			vm.eventRequestManager().deleteEventRequest( oldReq );
+		stepThread( ( int ) threadId, StepRequest.STEP_OUT, true );
+	}
+
+	public void stepThread( int threadId, int depth, boolean singleThread ) {
+		synchronized ( stopLock ) {
+			BreakpointContext	context	= getBreakpointContextByThread( threadId )
+			    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) );
+			StepRequest			old		= stepRequests.remove( ( long ) threadId );
+			if ( old != null )
+				vm.eventRequestManager().deleteEventRequest( old );
+			StepRequest request = vm.eventRequestManager().createStepRequest( context.getThreadReference(), StepRequest.STEP_LINE, depth );
+			request.addClassFilter( "boxgenerated.*" );
+			request.addCountFilter( 1 );
+			request.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
+			request.enable();
+			stepRequests.put( ( long ) threadId, request );
+			resumeStops( singleThread ? List.of( context ) : new ArrayList<>( breakPointContexts.values() ), true );
 		}
-
-		var thread = vm.allThreads().stream().filter( t -> t.uniqueID() == threadId ).findFirst();
-
-		if ( thread.isEmpty() ) {
-			LOGGER.warning( "Cannot step thread - not found: " + threadId );
-			return;
-		}
-
-		var stepRequest = vm.eventRequestManager().createStepRequest( thread.get(),
-		    StepRequest.STEP_LINE,
-		    StepRequest.STEP_OUT );
-		stepRequest.addClassFilter( "boxgenerated.*" );
-		stepRequest.setSuspendPolicy( EventRequest.SUSPEND_EVENT_THREAD );
-		stepRequest.enable();
-		stepRequests.put( threadId, stepRequest );
-
-		continueExecution( ( int ) threadId );
 	}
 
 	public Optional<BreakpointContext> getBreakpointContext( int breakpointId ) {
-		return Optional.ofNullable( breakPointContexts.get( breakpointId ) );
+		return breakPointContexts.values().stream().filter( ctx -> ctx.getBreakpointId() == breakpointId ).findFirst();
 	}
 
 	public Optional<BreakpointContext> getBreakpointContextByThread( int threadId ) {
-		return breakPointContexts.values()
-		    .stream()
-		    .filter( ctx -> ctx.getThreadReference().uniqueID() == threadId )
-		    .findFirst();
+		return Optional.ofNullable( breakPointContexts.get( ( long ) threadId ) );
 	}
 
 	public Optional<BreakpointContext> getBreakpointContextbyStackFrame( int stackframeId ) {
@@ -659,7 +605,7 @@ public class VMController {
 	 *
 	 * @param filePath The source file path to create a targeted request for
 	 */
-	private void createTargetedClassPrepareRequest( String filePath ) {
+	private synchronized void createTargetedClassPrepareRequest( String filePath ) {
 		if ( vm == null ) {
 			return;
 		}
@@ -669,7 +615,12 @@ public class VMController {
 			return;
 		}
 
-		String classPattern = filePathToClassPattern( filePath );
+		boolean	windowsSource	= filePath.matches( "^[A-Za-z]:/.*" ) || filePath.startsWith( "//" );
+		boolean	sourceFilter	= vm.canUseSourceNameFilters() && !windowsSource;
+		// JDI source filters are case-sensitive. For Windows, suspend the class family instead;
+		// the full-path binding check still keeps unrelated sources separate.
+		String	classPattern	= windowsSource ? breakpointClassNamespace( filePath ) + ".*"
+		    : ( sourceFilter ? "boxgenerated.*" : filePathToClassPattern( filePath ) );
 		if ( classPattern == null ) {
 			return;
 		}
@@ -677,6 +628,10 @@ public class VMController {
 		EventRequestManager	requestManager	= vm.eventRequestManager();
 		ClassPrepareRequest	request			= requestManager.createClassPrepareRequest();
 		request.addClassFilter( classPattern );
+		if ( sourceFilter ) {
+			// Only narrows suspension; binding still checks the full mapped source path.
+			request.addSourceNameFilter( "*" + PathMappingService.getFileName( filePath ) );
+		}
 
 		// Before userCodeStarted, use SUSPEND_NONE to avoid blocking during BoxLang init
 		// After userCodeStarted, use SUSPEND_EVENT_THREAD to properly set breakpoints
@@ -701,7 +656,7 @@ public class VMController {
 	 * The previous SUSPEND_NONE requests are deleted and replaced with SUSPEND_EVENT_THREAD
 	 * requests to ensure we can properly set breakpoints when user code classes are loaded.
 	 */
-	private void recreateTargetedClassPrepareRequestsWithSuspend() {
+	private synchronized void recreateTargetedClassPrepareRequestsWithSuspend() {
 		if ( vm == null || targetedClassPrepareRequests.isEmpty() ) {
 			return;
 		}
@@ -765,6 +720,11 @@ public class VMController {
 	 * @return A class pattern for matching (e.g.,
 	 *         boxgenerated.templates.users.elpete.developer.github.ortus__boxlang.bx__debugger.src.test.resources.Main$bxs*)
 	 */
+	private String breakpointClassNamespace( String filePath ) {
+		String lower = filePath.toLowerCase( java.util.Locale.ROOT );
+		return lower.endsWith( ".cfc" ) || lower.endsWith( ".bx" ) ? "boxgenerated.boxclass" : "boxgenerated.templates";
+	}
+
 	private String filePathToClassPattern( String filePath ) {
 		if ( filePath == null || filePath.isEmpty() ) {
 			return null;
@@ -773,7 +733,7 @@ public class VMController {
 		try {
 			// Use BoxLang's FQN class to generate the correct class pattern
 			// This ensures we match exactly what BoxLang generates
-			FQN fqn = FQN.of( "boxgenerated.templates", Path.of( filePath ) );
+			FQN fqn = FQN.of( breakpointClassNamespace( filePath ), Path.of( filePath ) );
 
 			// Append wildcard to match inner classes (closures, lambdas, etc.)
 			return fqn.toString() + "*";
@@ -859,9 +819,7 @@ public class VMController {
 			}
 		}
 
-		// Service not running - this is a fatal error
-		fatalError( "DebuggerUtil not running" );
-		return false; // Unreachable, but satisfies compiler
+		throw new IllegalStateException( "DebuggerUtil not running; start BoxLang with debugMode=true" );
 	}
 
 	/**
@@ -1039,7 +997,7 @@ public class VMController {
 	/**
 	 * Set a breakpoint at the specified file and line
 	 */
-	public boolean setBreakpoint( PendingBreakpoint pending ) {
+	public synchronized boolean setBreakpoint( PendingBreakpoint pending ) {
 		String				filePath		= pending.getFilePath();
 		int					lineNumber		= pending.getSourceBreakpoint().getLine();
 		SourceBreakpoint	srcBp			= pending.getSourceBreakpoint();
@@ -1059,7 +1017,6 @@ public class VMController {
 
 			// If VM is not available, just add to pending breakpoints
 			if ( vm == null ) {
-				pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, breakpointId, condition, hitCondition, logMessage ) );
 				LOGGER.info( "VM not available, added breakpoint to pending list: " + filePath + ":" + lineNumber );
 				return false; // Return false - breakpoint is not yet verified (VM not running)
 			}
@@ -1069,10 +1026,9 @@ public class VMController {
 				return true;
 			}
 
-			// If not successful, add to pending breakpoints for ClassPrepareEvent handling
-			pendingBreakpoints.add( new PendingBreakpointInfo( filePath, lineNumber, breakpointId, condition, hitCondition, logMessage ) );
+			// Keep the logical breakpoint for future class-prepare events.
 			LOGGER.info( "Added breakpoint to pending list: " + filePath + ":" + lineNumber );
-			return true; // Return true since we'll set it when the class loads
+			return false; // Queued is not bound.
 
 		} catch ( Exception e ) {
 			LOGGER.severe( "Failed to set breakpoint: " + e.getMessage() );
@@ -1106,16 +1062,22 @@ public class VMController {
 		// Get all loaded classes that might contain this file
 		List<ReferenceType> classes;
 		try {
-			classes = vm.allClasses();
+			if ( !breakpointClassesDiscovered ) {
+				for ( ReferenceType type : vm.allClasses() ) {
+					if ( type.name().startsWith( "boxgenerated." ) ) {
+						breakpointClasses.add( type );
+					}
+				}
+				breakpointClassesDiscovered = true;
+			}
+			classes = new ArrayList<>( breakpointClasses );
 			LOGGER.fine( "Found " + classes.size() + " loaded classes to search" );
 		} catch ( Exception e ) {
 			LOGGER.warning( "Error getting loaded classes: " + e.getMessage() );
 			return false;
 		}
 
-		// Track best matching class - prefer BoxLang generated classes
-		ReferenceType	bestMatch			= null;
-		Location		bestMatchLocation	= null;
+		boolean bound = false;
 
 		for ( ReferenceType refType : classes ) {
 			try {
@@ -1128,23 +1090,15 @@ public class VMController {
 				// Try to find the location for this line in this class
 				List<Location> locations = refType.locationsOfLine( lineNumber );
 
-				if ( !locations.isEmpty() ) {
-					// Check if this location corresponds to our file
-					Location	location	= locations.get( 0 );
-					String		sourceName	= getSourceName( location );
-					String		sourcePath	= getSourcePath( location );
+				for ( Location location : locations ) {
+					String	sourceName	= getSourceName( location );
+					String	sourcePath	= getSourcePath( location );
 
 					LOGGER.fine( "Found location at " + sourceName + " (path: " + sourcePath + ") :" + lineNumber + " in class " + className );
 
-					// Use intelligent path matching that handles:
-					// 1. Full path match (sourcePath == filePath)
-					// 2. Filename-only match (sourceName == filename from filePath)
-					// 3. Suffix match (filePath ends with sourcePath or vice versa)
+					// Require the full mapped source identity; equal basenames are not enough.
 					if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-						bestMatch			= refType;
-						bestMatchLocation	= location;
-						LOGGER.fine( "Found matching boxgenerated class: " + className );
-						// Don't break - keep looking for potentially newer versions
+						bound |= createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
 					}
 				}
 			} catch ( AbsentInformationException e ) {
@@ -1156,13 +1110,7 @@ public class VMController {
 			}
 		}
 
-		if ( bestMatch != null && bestMatchLocation != null ) {
-			LOGGER.fine( "Setting breakpoint on class: " + bestMatch.name() + " at line " + lineNumber );
-			return createBreakpointRequest( breakpointId, bestMatchLocation, filePath, lineNumber, condition, hitCondition, logMessage );
-		}
-
-		LOGGER.fine( "Class not yet loaded for breakpoint at " + filePath + ":" + lineNumber );
-		return false;
+		return bound;
 
 	}
 
@@ -1193,14 +1141,13 @@ public class VMController {
 				return false;
 			}
 
-			Location	location	= locations.get( 0 );
-			String		sourceName	= getSourceName( location );
-			String		sourcePath	= getSourcePath( location );
-
-			if ( pathsMatchForBreakpoint( sourceName, sourcePath, filePath ) ) {
-				LOGGER.fine( "Setting breakpoint on class: " + refType.name() + " at line " + lineNumber );
-				return createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
+			boolean bound = false;
+			for ( Location location : locations ) {
+				if ( pathsMatchForBreakpoint( getSourceName( location ), getSourcePath( location ), filePath ) ) {
+					bound |= createBreakpointRequest( breakpointId, location, filePath, lineNumber, condition, hitCondition, logMessage );
+				}
 			}
+			return bound;
 		} catch ( AbsentInformationException e ) {
 			// This class doesn't have debug info
 		} catch ( Exception e ) {
@@ -1215,7 +1162,7 @@ public class VMController {
 	 *
 	 * @param pathMappingService The path mapping service to use
 	 */
-	public void setPathMappingService( PathMappingService pathMappingService ) {
+	public synchronized void setPathMappingService( PathMappingService pathMappingService ) {
 		this.pathMappingService = pathMappingService;
 	}
 
@@ -1237,42 +1184,13 @@ public class VMController {
 			return false;
 		}
 
-		// If we have a path mapping service, use its comprehensive matching
-		if ( pathMappingService != null && sourcePath != null ) {
-			if ( pathMappingService.pathsMatch( sourcePath, filePath ) ) {
-				return true;
-			}
+		// BoxLang may put an absolute SourceFile name behind a generated package prefix.
+		String actual = BoxLangStackFrame.isAbsoluteSourcePath( sourcePath ) ? sourcePath : sourceName;
+		if ( !BoxLangStackFrame.isAbsoluteSourcePath( actual ) ) {
+			return false; // A basename alone cannot identify the requested source safely.
 		}
-
-		String	normalizedFilePath	= PathMappingService.normalizePath( filePath );
-		String	fileName			= PathMappingService.getFileName( filePath );
-
-		// Try full path match first
-		if ( sourcePath != null ) {
-			String normalizedSourcePath = PathMappingService.normalizePath( sourcePath );
-			if ( normalizedSourcePath.equalsIgnoreCase( normalizedFilePath ) ) {
-				return true;
-			}
-			// Check suffix match - the full filePath might end with sourcePath
-			if ( normalizedFilePath.toLowerCase().endsWith( normalizedSourcePath.toLowerCase() ) ) {
-				return true;
-			}
-			// Or sourcePath might end with the relative part of filePath
-			if ( normalizedSourcePath.toLowerCase().endsWith( fileName.toLowerCase() ) &&
-			    normalizedFilePath.toLowerCase().endsWith( fileName.toLowerCase() ) ) {
-				// Both paths have the same filename - likely the same file
-				return true;
-			}
-		}
-
-		// Try filename match - compare JDI sourceName with just the filename from filePath
-		if ( sourceName != null && fileName != null ) {
-			if ( sourceName.equalsIgnoreCase( fileName ) ) {
-				return true;
-			}
-		}
-
-		return false;
+		return pathMappingService == null ? PathMappingService.samePath( actual, filePath )
+		    : pathMappingService.pathsMatch( actual, filePath );
 	}
 
 	/**
@@ -1306,6 +1224,11 @@ public class VMController {
 	private boolean createBreakpointRequest( int breakpointId, Location location, String filePath, int lineNumber,
 	    String condition, String hitCondition, String logMessage ) {
 		try {
+			for ( BreakpointRequest existing : activeBreakpoints ) {
+				if ( Integer.valueOf( breakpointId ).equals( existing.getProperty( "breakPointId" ) ) && location.equals( existing.location() ) ) {
+					return true;
+				}
+			}
 			EventRequestManager	requestManager		= vm.eventRequestManager();
 			BreakpointRequest	breakpointRequest	= requestManager.createBreakpointRequest( location );
 			breakpointRequest.setSuspendPolicy( BreakpointRequest.SUSPEND_EVENT_THREAD );
@@ -1317,7 +1240,7 @@ public class VMController {
 			breakpointRequest.putProperty( "logMessage", logMessage );
 
 			// Initialize hit count for this breakpoint
-			breakpointHitCounts.put( breakpointId, 0 );
+			breakpointHitCounts.putIfAbsent( breakpointId, 0 );
 
 			// Enable the breakpoint
 			breakpointRequest.enable();
@@ -1378,9 +1301,29 @@ public class VMController {
 	 */
 	public void stopEventProcessing() {
 		eventProcessingActive = false;
-		if ( eventProcessingThread != null ) {
-			eventProcessingThread.interrupt();
+		synchronized ( stopLock ) {
+			breakPointContexts.values().forEach( BreakpointContext::invalidate );
+			breakPointContexts.clear();
+			vmStartEventSet = null;
+			exceptionInfoByThread.clear();
+			for ( StepRequest request : stepRequests.values() ) {
+				try {
+					vm.eventRequestManager().deleteEventRequest( request );
+				} catch ( Exception e ) {
+					LOGGER.fine( "Unable to delete step request during cleanup: " + e.getMessage() );
+				}
+			}
+			stepRequests.clear();
 		}
+		decisionExecutor.shutdownNow();
+		synchronized ( invocations ) {
+			invocationExecutor.shutdownNow();
+			invocations.forEach( future -> future.completeExceptionally( new IllegalStateException( "Debug session has ended" ) ) );
+		}
+		CompletableFuture<Void> preparing = debugFuture;
+		if ( preparing != null )
+			preparing.completeExceptionally( new IllegalStateException( "Debug session has ended" ) );
+		// Queue polling/disposal wakes the pump. Interrupting a DAP socket write would close the transport.
 		LOGGER.info( "Stopped breakpoint event processing" );
 	}
 
@@ -1389,25 +1332,17 @@ public class VMController {
 	 * This allows the VM to be resumed if it was waiting for configuration.
 	 */
 	public void signalConfigurationDone() {
-		LOGGER.info( "Configuration done signaled" );
-		configurationDone = true;
+		synchronized ( stopLock ) {
+			configurationDone = true;
+			resumeStartEventIfConfigured();
+		}
+	}
 
-		// If VMStartEvent was already received and we were waiting for configuration,
-		// now we can resume the VM
-		if ( vmStartEventReceived && vm != null ) {
-			LOGGER.info( "Resuming VM after configurationDone" );
-			LOGGER.fine( "[TIMING] VM resumed at T+" + getElapsedTime() + "ms" );
-			try {
-				// First resume via the EventSet if we have one stored
-				if ( vmStartEventSet != null ) {
-					vmStartEventSet.resume();
-					vmStartEventSet = null;
-				}
-				// Also call vm.resume() to ensure the VM is fully resumed
-				vm.resume();
-			} catch ( Exception e ) {
-				LOGGER.severe( "Failed to resume VM after configurationDone: " + e.getMessage() );
-			}
+	private void resumeStartEventIfConfigured() {
+		if ( configurationDone && vmStartEventSet != null ) {
+			EventSet start = vmStartEventSet;
+			vmStartEventSet = null;
+			start.resume();
 		}
 	}
 
@@ -1429,7 +1364,7 @@ public class VMController {
 					try {
 						if ( vm != null && vm.process() != null && !vm.process().isAlive() ) {
 							LOGGER.warning( "VM process has terminated! Exit value: " + vm.process().exitValue() );
-							eventProcessingActive = false;
+							targetTerminated();
 							return;
 						}
 					} catch ( Exception pe ) {
@@ -1438,40 +1373,41 @@ public class VMController {
 					continue; // Timeout, check if we should continue
 				}
 
-				EventIterator eventIterator = eventSet.eventIterator();
+				EventIterator	eventIterator	= eventSet.eventIterator();
+				boolean			stopHandled		= false;
 
 				while ( eventIterator.hasNext() ) {
 					Event event = eventIterator.nextEvent();
 
 					if ( event instanceof BreakpointEvent be ) {
-						handleBreakpointEvent( be );
+						if ( !stopHandled ) {
+							if ( be.request().getProperty( "condition" ) != null || be.request().getProperty( "logMessage" ) != null ) {
+								decisionExecutor.execute( () -> handleBreakpointEvent( be, eventSet ) );
+							} else {
+								handleBreakpointEvent( be, eventSet );
+							}
+						}
+						stopHandled = true;
 					} else if ( event instanceof StepEvent se ) {
-						handleStepEvent( se );
+						if ( !stopHandled )
+							handleStepEvent( se, eventSet );
+						stopHandled = true;
 					} else if ( event instanceof ClassPrepareEvent cpe ) {
 						handleClassPrepareEvent( cpe );
 					} else if ( event instanceof MethodEntryEvent mee ) {
 						handleMethodEntryEvent( mee );
 					} else if ( event instanceof ExceptionEvent ee ) {
-						handleExceptionEvent( ee );
+						if ( !stopHandled )
+							handleExceptionEvent( ee, eventSet );
+						stopHandled = true;
 					} else if ( event instanceof VMStartEvent ) {
-						vmStartEventReceived	= true;
-						vmStartEventSet			= eventSet;  // Store the eventSet for later resume
-						// Only resume VM if configurationDone has been received
-						// This follows the proper DAP flow where the client sets breakpoints first
-						if ( configurationDone ) {
-							LOGGER.info( "VM started and configuration already done, resuming VM" );
-							try {
-								vmStartEventSet.resume();  // Resume the eventSet, not just the VM
-								vmStartEventSet = null;
-							} catch ( Exception e ) {
-								LOGGER.severe( "Failed to resume VM after VMStartEvent: " + e.getMessage() );
-							}
-						} else {
-							LOGGER.info( "VM started, waiting for configurationDone before resuming" );
+						synchronized ( stopLock ) {
+							vmStartEventSet = eventSet;
+							resumeStartEventIfConfigured();
 						}
 					} else if ( event instanceof VMDeathEvent || event instanceof VMDisconnectEvent ) {
 						LOGGER.info( "VM terminated, stopping event processing" );
-						eventProcessingActive = false;
+						targetTerminated();
 						return;
 					}
 				}
@@ -1484,22 +1420,19 @@ public class VMController {
 				while ( iter.hasNext() ) {
 					Event evt = iter.nextEvent();
 					if ( evt instanceof BreakpointEvent be ) {
-						eventSets.put( be.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof MethodEntryEvent mee ) {
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof StepEvent se ) {
-						eventSets.put( se.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on breakpoint - wait for continue request
 						break;
 					} else if ( evt instanceof ExceptionEvent ee ) {
-						eventSets.put( ee.thread().uniqueID(), eventSet );
 						shouldResume = false; // Don't auto-resume on exception - wait for continue request
 						break;
 					} else if ( evt instanceof VMStartEvent ) {
-						// VMStartEvent is handled by calling vm.resume() above, no need for eventSet.resume()
+						// The startup event has its own configuration gate.
 						isVMStartEvent = true;
 					}
 				}
@@ -1522,6 +1455,9 @@ public class VMController {
 				// If shouldResume is false (breakpoint hit), the thread stays suspended
 				// until the debugger client sends a continue/step request
 
+			} catch ( com.sun.jdi.VMDisconnectedException e ) {
+				targetTerminated();
+				return;
 			} catch ( InterruptedException e ) {
 				LOGGER.info( "Event processing interrupted" );
 				Thread.currentThread().interrupt();
@@ -1657,20 +1593,22 @@ public class VMController {
 	/**
 	 * Handle a breakpoint event
 	 */
-	private void handleBreakpointEvent( BreakpointEvent event ) {
+	private void handleBreakpointEvent( BreakpointEvent event, EventSet eventSet ) {
+		BreakpointContext	context			= null;
+		Integer				breakpointId	= null;
 		try {
 			// Ensure helper threads are available for condition evaluation
 			// The worker thread processes tasks, the invoker thread is used for JDI invocations
 			// ensureDebugHelperThreadsReady();
 
-			Location			location		= event.location();
-			String				sourceName		= getSourceName( location );
-			int					lineNumber		= location.lineNumber();
-			BreakpointRequest	request			= ( BreakpointRequest ) event.request();
-			Integer				breakpointId	= ( Integer ) request.getProperty( "breakPointId" );
-			String				condition		= ( String ) request.getProperty( "condition" );
-			String				hitCondition	= ( String ) request.getProperty( "hitCondition" );
-			String				logMessage		= ( String ) request.getProperty( "logMessage" );
+			Location			location	= event.location();
+			String				sourceName	= getSourceName( location );
+			int					lineNumber	= location.lineNumber();
+			BreakpointRequest	request		= ( BreakpointRequest ) event.request();
+			breakpointId = ( Integer ) request.getProperty( "breakPointId" );
+			String	condition		= ( String ) request.getProperty( "condition" );
+			String	hitCondition	= ( String ) request.getProperty( "hitCondition" );
+			String	logMessage		= ( String ) request.getProperty( "logMessage" );
 
 			LOGGER.info( "Breakpoint hit at " + sourceName + ":" + lineNumber );
 
@@ -1680,13 +1618,15 @@ public class VMController {
 
 			// Track context for expression evaluation (needed before condition check)
 			int contextId = generateBreakpointId();
-			trackBreakpointContext( contextId, event.thread() );
+			context = trackBreakpointContext( contextId, event.thread(), eventSet );
+			if ( context == null )
+				return;
 
 			// Check hit condition if specified
 			if ( hitCondition != null && !hitCondition.isEmpty() ) {
 				if ( !checkHitCondition( hitCondition, hitCount ) ) {
 					LOGGER.info( "Hit condition not met: " + hitCondition + " (hit count: " + hitCount + ")" );
-					event.thread().resume();
+					resumeWithoutNotification( context );
 					return;
 				}
 			}
@@ -1695,7 +1635,7 @@ public class VMController {
 			if ( condition != null && !condition.isEmpty() ) {
 				if ( !evaluateCondition( contextId, condition ) ) {
 					LOGGER.info( "Condition evaluated to false: " + condition );
-					event.thread().resume();
+					resumeWithoutNotification( context );
 					return;
 				}
 			}
@@ -1704,8 +1644,8 @@ public class VMController {
 			if ( logMessage != null && !logMessage.isEmpty() ) {
 				String expandedMessage = expandLogMessage( contextId, logMessage, hitCount );
 				sendLogOutput( expandedMessage, sourceName, lineNumber );
-				LOGGER.info( "Logpoint: " + expandedMessage );
-				event.thread().resume();
+				LOGGER.fine( "Logpoint: " + expandedMessage );
+				resumeWithoutNotification( context );
 				return;
 			}
 
@@ -1717,7 +1657,7 @@ public class VMController {
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 				stoppedArgs.setHitBreakpointIds( new Integer[] { breakpointId } );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client" );
 				LOGGER.fine( "[TIMING] Breakpoint hit at T+" + getElapsedTime() + "ms" );
 				LOGGER.fine( "[TIMING] Summary - ClassPrepareEvents: " + classPrepareEventCount +
@@ -1727,7 +1667,17 @@ public class VMController {
 			}
 
 		} catch ( Exception e ) {
-			LOGGER.severe( "Error handling breakpoint event: " + e.getMessage() );
+			LOGGER.log( java.util.logging.Level.WARNING, "Breakpoint evaluation failed", e );
+			if ( context != null ) {
+				StoppedEventArguments stopped = new StoppedEventArguments();
+				stopped.setReason( "breakpoint" );
+				stopped.setDescription( "Breakpoint evaluation failed: " + e.getMessage() );
+				stopped.setThreadId( ( int ) event.thread().uniqueID() );
+				stopped.setHitBreakpointIds( new Integer[] { breakpointId } );
+				publishStop( context, stopped );
+			} else if ( eventProcessingActive ) {
+				eventSet.resume();
+			}
 		}
 	}
 
@@ -1773,22 +1723,19 @@ public class VMController {
 		try {
 			Optional<BreakpointContext> bpContextOpt = getBreakpointContext( contextId );
 			if ( bpContextOpt.isEmpty() ) {
-				LOGGER.warning( "No breakpoint context found for condition evaluation" );
-				return true; // Default to stopping if we can't evaluate
+				throw new IllegalStateException( "No stopped context for condition evaluation" );
 			}
 
 			BreakpointContext	bpContext	= bpContextOpt.get();
 			ObjectReference		context		= bpContext.getContext();
 
 			if ( context == null ) {
-				LOGGER.warning( "No IBoxContext found for condition evaluation" );
-				return true;
+				throw new IllegalStateException( "No IBoxContext for condition evaluation" );
 			}
 
 			ObjectReference runtime = ( ObjectReference ) getRuntime().get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
 			if ( runtime == null ) {
-				LOGGER.warning( "Could not get runtime for condition evaluation" );
-				return true;
+				throw new IllegalStateException( "Runtime unavailable for condition evaluation" );
 			}
 
 			CompletableFuture<Value>	evalFuture	= InvokeTools.submitAndInvoke(
@@ -1802,12 +1749,13 @@ public class VMController {
 			Value						result		= evalFuture.get( CONDITION_EVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS );
 			return isTruthy( result );
 
+		} catch ( InterruptedException e ) {
+			Thread.currentThread().interrupt();
+			throw new java.util.concurrent.CompletionException( e );
 		} catch ( TimeoutException e ) {
-			LOGGER.warning( "Condition evaluation timed out after " + CONDITION_EVAL_TIMEOUT_SECONDS + " seconds: " + condition );
-			return true; // Default to stopping on timeout
+			throw new IllegalStateException( "Condition evaluation timed out after " + CONDITION_EVAL_TIMEOUT_SECONDS + " seconds", e );
 		} catch ( Exception e ) {
-			LOGGER.warning( "Error evaluating condition: " + e.getMessage() );
-			return true; // Default to stopping on error
+			throw new java.util.concurrent.CompletionException( e );
 		}
 	}
 
@@ -1841,6 +1789,10 @@ public class VMController {
 		if ( value instanceof com.sun.jdi.StringReference ) {
 			String strValue = ( ( com.sun.jdi.StringReference ) value ).value();
 			return strValue != null && !strValue.isEmpty() && !strValue.equalsIgnoreCase( "false" );
+		}
+
+		if ( value instanceof ObjectReference boxed && boxed.referenceType().name().equals( "java.lang.Boolean" ) ) {
+			return isTruthy( boxed.getValue( boxed.referenceType().fieldByName( "value" ) ) );
 		}
 
 		// Handle ObjectReference - non-null is truthy
@@ -1968,23 +1920,25 @@ public class VMController {
 	 * Send a log output event to the debug client
 	 */
 	private void sendLogOutput( String message, String sourceName, int lineNumber ) {
-		if ( client != null ) {
-			OutputEventArguments outputArgs = new OutputEventArguments();
-			outputArgs.setCategory( "console" );
-			outputArgs.setOutput( message + "\n" );
+		synchronized ( stopLock ) {
+			if ( client != null && eventProcessingActive ) {
+				OutputEventArguments outputArgs = new OutputEventArguments();
+				outputArgs.setCategory( "console" );
+				outputArgs.setOutput( message + "\n" );
 
-			if ( sourceName != null ) {
-				Source source = new Source();
-				source.setPath( sourceName );
-				outputArgs.setSource( source );
-				outputArgs.setLine( lineNumber );
+				if ( sourceName != null ) {
+					Source source = new Source();
+					source.setPath( sourceName );
+					outputArgs.setSource( source );
+					outputArgs.setLine( lineNumber );
+				}
+
+				client.output( outputArgs );
 			}
-
-			client.output( outputArgs );
 		}
 	}
 
-	private void handleStepEvent( StepEvent event ) {
+	private void handleStepEvent( StepEvent event, EventSet eventSet ) {
 		try {
 			Location	location	= event.location();
 			String		sourceName	= getSourceName( location );
@@ -1992,13 +1946,9 @@ public class VMController {
 
 			LOGGER.info( "Step completed at " + sourceName + ":" + lineNumber );
 
-			// Remove the step request as it is no longer needed
-			StepRequest stepRequest = stepRequests.remove( event.thread().uniqueID() );
-			if ( stepRequest != null ) {
-				vm.eventRequestManager().deleteEventRequest( stepRequest );
-			}
-
-			trackBreakpointContext( generateBreakpointId(), event.thread() );
+			BreakpointContext context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
+			if ( context == null )
+				return;
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -2007,7 +1957,7 @@ public class VMController {
 				stoppedArgs.setDescription( "Paused after step" );
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client after step" );
 			}
 
@@ -2019,7 +1969,7 @@ public class VMController {
 	/**
 	 * Handle an exception event
 	 */
-	private void handleExceptionEvent( ExceptionEvent event ) {
+	private void handleExceptionEvent( ExceptionEvent event, EventSet eventSet ) {
 		try {
 			Location		location		= event.catchLocation() != null ? event.catchLocation() : event.location();
 			String			sourceName		= getSourceName( location );
@@ -2034,20 +1984,24 @@ public class VMController {
 			LOGGER.info( "Exception hit: " + exceptionType + " at " + sourceName + ":" + lineNumber + " (caught=" + isCaught + ")" );
 
 			// Extract exception message if possible
-			String			exceptionMessage	= extractExceptionMessage( exceptionObj );
+			String				exceptionMessage	= extractExceptionMessage( exceptionObj );
 
 			// Store exception info for this thread
-			ExceptionInfo	exceptionInfo		= new ExceptionInfo(
+			ExceptionInfo		exceptionInfo		= new ExceptionInfo(
 			    exceptionType,
 			    exceptionMessage != null ? exceptionMessage : exceptionType,
 			    breakMode,
 			    exceptionType,
 			    exceptionMessage
 			);
-			exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
-
-			// Track the breakpoint context
-			trackBreakpointContext( generateBreakpointId(), event.thread() );
+			// Track the breakpoint context and exception together before publishing the stop.
+			BreakpointContext	context;
+			synchronized ( stopLock ) {
+				context = trackBreakpointContext( generateBreakpointId(), event.thread(), eventSet );
+				if ( context == null )
+					return;
+				exceptionInfoByThread.put( event.thread().uniqueID(), exceptionInfo );
+			}
 
 			// Send stopped event to the debug client
 			if ( client != null ) {
@@ -2057,7 +2011,7 @@ public class VMController {
 				stoppedArgs.setThreadId( ( int ) event.thread().uniqueID() );
 				stoppedArgs.setText( exceptionMessage != null ? exceptionMessage : exceptionType );
 
-				client.stopped( stoppedArgs );
+				publishStop( context, stoppedArgs );
 				LOGGER.info( "Sent stopped event to client for exception" );
 			}
 
@@ -2103,21 +2057,99 @@ public class VMController {
 		return null;
 	}
 
-	private void trackBreakpointContext( int breakpointId, ThreadReference thread ) {
-		for ( var entry : breakPointContexts.entrySet() ) {
-			if ( entry.getValue().getThreadReference().equals( thread ) ) {
-				breakPointContexts.remove( entry.getKey() );
+	private BreakpointContext trackBreakpointContext( int breakpointId, ThreadReference thread, EventSet eventSet ) {
+		synchronized ( stopLock ) {
+			if ( !eventProcessingActive ) {
+				eventSet.resume();
+				return null;
+			}
+			StepRequest step = stepRequests.remove( thread.uniqueID() );
+			if ( step != null )
+				vm.eventRequestManager().deleteEventRequest( step );
+			BreakpointContext	context	= new BreakpointContext( breakpointId, thread, this, eventSet );
+			BreakpointContext	old		= breakPointContexts.put( thread.uniqueID(), context );
+			if ( old != null )
+				old.invalidate();
+			exceptionInfoByThread.remove( thread.uniqueID() );
+			return context;
+		}
+	}
+
+	private void publishStop( BreakpointContext context, StoppedEventArguments event ) {
+		synchronized ( stopLock ) {
+			if ( eventProcessingActive && breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
+				event.setAllThreadsStopped( false );
+				client.stopped( event );
 			}
 		}
+	}
 
-		breakPointContexts.put( breakpointId, new BreakpointContext( breakpointId, thread, this ) );
+	private void resumeWithoutNotification( BreakpointContext context ) {
+		synchronized ( stopLock ) {
+			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) == context ) {
+				resumeStops( List.of( context ), false );
+			}
+		}
+	}
+
+	public VariableManager getVariables( int reference ) {
+		synchronized ( stopLock ) {
+			return breakPointContexts.values().stream().map( BreakpointContext::getVariables )
+			    .filter( variables -> variables.contains( reference ) ).findFirst()
+			    .orElseThrow( () -> new IllegalArgumentException( "Unknown or expired variables reference " + reference ) );
+		}
+	}
+
+	public void continueExecution( BreakpointContext context ) {
+		synchronized ( stopLock ) {
+			resumeStops( List.of( context ), true );
+		}
+	}
+
+	// Called under stopLock: validate the captured stops before touching the VM.
+	private boolean resumeStops( List<BreakpointContext> contexts, boolean notifyClient ) {
+		for ( BreakpointContext context : contexts ) {
+			if ( breakPointContexts.get( context.getThreadReference().uniqueID() ) != context ) {
+				throw new IllegalArgumentException( "Stop has already resumed for thread " + context.getThreadReference().uniqueID() );
+			}
+		}
+		for ( BreakpointContext context : contexts ) {
+			long threadId = context.getThreadReference().uniqueID();
+			breakPointContexts.remove( threadId );
+			context.invalidate();
+			exceptionInfoByThread.remove( threadId );
+		}
+		boolean allContinued = breakPointContexts.isEmpty();
+		try {
+			if ( notifyClient && client != null && !contexts.isEmpty() ) {
+				ContinuedEventArguments event = new ContinuedEventArguments();
+				event.setThreadId( ( int ) contexts.getFirst().getThreadReference().uniqueID() );
+				event.setAllThreadsContinued( allContinued );
+				client.continued( event );
+			}
+		} finally {
+			for ( BreakpointContext context : contexts )
+				context.getEventSet().resume();
+		}
+		return allContinued;
+	}
+
+	public boolean continueExecution( int threadId, boolean singleThread ) {
+		synchronized ( stopLock ) {
+			BreakpointContext context = getBreakpointContextByThread( threadId )
+			    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) );
+			return resumeStops( singleThread ? List.of( context ) : new ArrayList<>( breakPointContexts.values() ), true );
+		}
 	}
 
 	/**
 	 * Handle a class prepare event - try to set pending breakpoints
 	 */
-	private void handleClassPrepareEvent( ClassPrepareEvent event ) {
+	private synchronized void handleClassPrepareEvent( ClassPrepareEvent event ) {
 		ReferenceType refType = event.referenceType();
+		if ( refType.name().startsWith( "boxgenerated." ) ) {
+			breakpointClasses.add( refType );
+		}
 		classPrepareEventCount++;
 
 		// Check if this is the DebuggerUtil class - store it for later use.
@@ -2151,22 +2183,6 @@ public class VMController {
 			}
 		}
 
-		// Try to set any pending breakpoints on THIS specific class (fast path - no vm.allClasses() call)
-		List<PendingBreakpointInfo> toRemove = new ArrayList<>();
-
-		for ( PendingBreakpointInfo pending : pendingBreakpoints ) {
-			// Use the fast path that only checks the newly loaded class
-			if ( trySetBreakpointOnSpecificClass( refType, pending.breakpointId, pending.filePath, pending.lineNumber,
-			    pending.condition, pending.hitCondition, pending.logMessage ) ) {
-				toRemove.add( pending );
-				LOGGER.fine( "[TIMING] Successfully set breakpoint at " + pending.filePath + ":" + pending.lineNumber +
-				    " at T+" + getElapsedTime() + "ms on class " + refType.name() );
-			}
-		}
-
-		// Remove successfully set breakpoints from pending list
-		pendingBreakpoints.removeAll( toRemove );
-
 		// Re-apply any verified breakpoints that might match this newly loaded class
 		// This handles the case where BoxLang recompiles source code and loads a new class version
 		reapplyVerifiedBreakpointsForClass( refType );
@@ -2184,56 +2200,20 @@ public class VMController {
 			return;
 		}
 
-		for ( VerifiedBreakpointInfo verified : verifiedBreakpoints.values() ) {
-			try {
-				// Try to find matching locations in the newly loaded class
-				List<Location> locations = refType.locationsOfLine( verified.getLineNumber() );
-
-				LOGGER.fine( "Checking breakpoint " + verified.getBreakpointId() + " at line " + verified.getLineNumber() +
-				    " - found " + locations.size() + " locations in class " + refType.name() );
-
-				if ( !locations.isEmpty() ) {
-					Location	location	= locations.get( 0 );
-					String		sourceName	= getSourceName( location );
-					String		sourcePath	= getSourcePath( location );
-
-					LOGGER.fine( "Location source: name=" + sourceName + ", path=" + sourcePath +
-					    ", breakpoint file=" + verified.getFilePath() );
-
-					// Check if this class matches the breakpoint's file
-					if ( pathsMatchForBreakpoint( sourceName, sourcePath, verified.getFilePath() ) ) {
-						LOGGER.info( "Path match found for breakpoint " + verified.getBreakpointId() +
-						    " in newly loaded class " + refType.name() );
-
-						// Remove any stale breakpoint requests for this breakpoint ID
-						// The old class version's breakpoint is no longer valid
-						removeStaleBreakpointRequests( verified.getBreakpointId() );
-
-						LOGGER.info( "Re-applying breakpoint " + verified.getBreakpointId() +
-						    " to reloaded class at " + verified.getFilePath() + ":" + verified.getLineNumber() );
-
-						createBreakpointRequest(
-						    verified.getBreakpointId(),
-						    location,
-						    verified.getFilePath(),
-						    verified.getLineNumber(),
-						    verified.getCondition(),
-						    verified.getHitCondition(),
-						    verified.getLogMessage()
-						);
-					}
+		for ( VerifiedBreakpointInfo requested : verifiedBreakpoints.values() ) {
+			if ( trySetBreakpointOnSpecificClass( refType, requested.getBreakpointId(), requested.getFilePath(),
+			    requested.getLineNumber(), requested.getCondition(), requested.getHitCondition(), requested.getLogMessage() ) ) {
+				PendingBreakpoint pending = pendingBreakpointsById.get( requested.getBreakpointId() );
+				if ( pending != null ) {
+					updateBreakpointStatus( pending, true );
 				}
-			} catch ( AbsentInformationException e ) {
-				// This class doesn't have debug info for this line, skip it
-				LOGGER.fine( "No debug info for line " + verified.getLineNumber() + " in class " + refType.name() );
 			}
 		}
 	}
 
 	/**
-	 * Remove stale breakpoint requests for a given breakpoint ID.
-	 * This is called when a class is reloaded and we need to replace the old breakpoint
-	 * with a new one on the new class version.
+	 * Remove JDI requests for a logical breakpoint being deleted/replaced.
+	 * Class preparation must not call this: existing sibling bindings can still execute.
 	 *
 	 * @param breakpointId The breakpoint ID to remove stale requests for
 	 */
@@ -2265,21 +2245,12 @@ public class VMController {
 	/**
 	 * Clear all active breakpoints
 	 */
-	public void clearAllBreakpoints() {
-		if ( vm == null ) {
-			LOGGER.info( "VM is null, no active breakpoints to clear" );
-			return;
+	public synchronized void clearAllBreakpoints() {
+		java.util.Set<String> sources = new java.util.HashSet<>( pendingBreakpointsByFile.keySet() );
+		verifiedBreakpoints.values().forEach( breakpoint -> sources.add( breakpoint.getFilePath() ) );
+		for ( String source : sources ) {
+			clearPendingBreakpointsForFile( source );
 		}
-
-		EventRequestManager requestManager = vm.eventRequestManager();
-
-		for ( BreakpointRequest request : activeBreakpoints ) {
-			requestManager.deleteEventRequest( request );
-		}
-
-		activeBreakpoints.clear();
-		verifiedBreakpoints.clear();
-		LOGGER.info( "Cleared all breakpoints" );
 	}
 
 	/**
@@ -2293,13 +2264,13 @@ public class VMController {
 	 * Generate a unique breakpoint ID
 	 */
 	public int generateBreakpointId() {
-		return breakpointIdCounter++;
+		return breakpointIdCounter.incrementAndGet();
 	}
 
 	/**
 	 * Store pending breakpoint for later verification
 	 */
-	public void storePendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
+	public synchronized void storePendingBreakpoint( Source source, SourceBreakpoint sourceBreakpoint, Breakpoint breakpoint ) {
 		PendingBreakpoint	pending		= new PendingBreakpoint( source, sourceBreakpoint, breakpoint );
 
 		// Store by file path for quick lookup during verification
@@ -2319,9 +2290,20 @@ public class VMController {
 	/**
 	 * Get all pending breakpoints for a specific file
 	 */
-	public List<PendingBreakpoint> getPendingBreakpointsForFile( String filePath ) {
-		String normalizedPath = normalizeFilePath( filePath );
-		return pendingBreakpointsByFile.getOrDefault( normalizedPath, new ArrayList<>() );
+	public synchronized List<PendingBreakpoint> getPendingBreakpointsForFile( String filePath ) {
+		return List.copyOf( pendingBreakpointsByFile.getOrDefault( breakpointSourceKey( filePath ), List.of() ) );
+	}
+
+	private String breakpointSourceKey( String filePath ) {
+		String normalized = normalizeFilePath( filePath );
+		if ( !pendingBreakpointsByFile.containsKey( normalized ) && pathMappingService != null ) {
+			// Pre-launch requests may still use local paths when launch supplies the remote roots.
+			for ( String existing : pendingBreakpointsByFile.keySet() ) {
+				if ( pathMappingService.pathsMatch( existing, normalized ) )
+					return existing;
+			}
+		}
+		return normalized;
 	}
 
 	/**
@@ -2332,9 +2314,12 @@ public class VMController {
 	}
 
 	/**
-	 * Remove a pending breakpoint (when verified or deleted)
+	 * Remove a logical breakpoint and its active bindings.
 	 */
-	public void removePendingBreakpoint( int breakpointId ) {
+	public synchronized void removePendingBreakpoint( int breakpointId ) {
+		removeStaleBreakpointRequests( breakpointId );
+		verifiedBreakpoints.remove( breakpointId );
+		breakpointHitCounts.remove( breakpointId );
 		PendingBreakpoint pending = pendingBreakpointsById.remove( breakpointId );
 		if ( pending != null ) {
 			String					filePath		= normalizeFilePath( pending.getFilePath() );
@@ -2357,12 +2342,12 @@ public class VMController {
 	/**
 	 * Clear all pending breakpoints for a file (when setting new breakpoints)
 	 */
-	public void clearPendingBreakpointsForFile( String filePath ) {
-		String					normalizedPath	= normalizeFilePath( filePath );
+	public synchronized void clearPendingBreakpointsForFile( String filePath ) {
+		String					normalizedPath	= breakpointSourceKey( filePath );
 		List<PendingBreakpoint>	fileBreakpoints	= pendingBreakpointsByFile.remove( normalizedPath );
 		if ( fileBreakpoints != null ) {
 			for ( PendingBreakpoint pending : fileBreakpoints ) {
-				pendingBreakpointsById.remove( pending.getBreakpoint().getId() );
+				removePendingBreakpoint( pending.getBreakpoint().getId() );
 			}
 			LOGGER.info( "Cleared " + fileBreakpoints.size() + " pending breakpoints for file: " + normalizedPath );
 		}
@@ -2370,8 +2355,9 @@ public class VMController {
 		// Also clear verified breakpoints for this file since they'll be replaced
 		clearVerifiedBreakpointsForFile( filePath );
 
-		// Clear active JDI breakpoint requests for this file
+		// Clear active JDI breakpoint requests and the now-unused class listener.
 		clearActiveBreakpointsForFile( filePath );
+		removeTargetedClassPrepareRequest( normalizedPath );
 	}
 
 	/**
@@ -2431,13 +2417,15 @@ public class VMController {
 
 		for ( Map.Entry<Integer, VerifiedBreakpointInfo> entry : verifiedBreakpoints.entrySet() ) {
 			String verifiedPath = normalizeFilePath( entry.getValue().getFilePath() );
-			if ( verifiedPath.equalsIgnoreCase( normalizedPath ) ) {
+			if ( PathMappingService.samePath( verifiedPath, normalizedPath ) ) {
 				toRemove.add( entry.getKey() );
 			}
 		}
 
 		for ( Integer id : toRemove ) {
+			removeStaleBreakpointRequests( id );
 			verifiedBreakpoints.remove( id );
+			breakpointHitCounts.remove( id );
 		}
 
 		if ( !toRemove.isEmpty() ) {
@@ -2452,28 +2440,29 @@ public class VMController {
 		return new HashMap<>( pendingBreakpointsByFile );
 	}
 
+	private void updateBreakpointStatus( PendingBreakpoint pending, boolean bound ) {
+		Breakpoint	breakpoint	= pending.getBreakpoint();
+		boolean		changed		= breakpoint.isVerified() != bound;
+		breakpoint.setVerified( bound );
+		breakpoint.setMessage( bound ? "Breakpoint verified and set" : "No executable location is loaded for this source and line" );
+		if ( changed && client != null ) {
+			org.eclipse.lsp4j.debug.BreakpointEventArguments event = new org.eclipse.lsp4j.debug.BreakpointEventArguments();
+			event.setReason( "changed" );
+			event.setBreakpoint( breakpoint );
+			client.breakpoint( event );
+		}
+	}
+
 	/**
 	 * Verify and set pending breakpoints using JDI
 	 */
-	public void verifyAndSetPendingBreakpoints() {
+	public synchronized void verifyAndSetPendingBreakpoints() {
 		int totalPending = pendingBreakpointsById.size();
 		if ( totalPending > 0 ) {
 			LOGGER.info( "Setting " + totalPending + " pending breakpoints" );
 
 			for ( PendingBreakpoint pending : pendingBreakpointsById.values() ) {
-				String	filePath	= pending.getFilePath();
-				int		lineNumber	= pending.getSourceBreakpoint().getLine();
-
-				boolean	success		= setBreakpoint( pending );
-				if ( success ) {
-					// Mark breakpoint as verified
-					pending.getBreakpoint().setVerified( true );
-					pending.getBreakpoint().setMessage( "Breakpoint verified and set" );
-					LOGGER.info( "Successfully set breakpoint at " + filePath + ":" + lineNumber );
-				} else {
-					pending.getBreakpoint().setMessage( "Could not verify breakpoint location" );
-					LOGGER.warning( "Failed to set breakpoint at " + filePath + ":" + lineNumber );
-				}
+				updateBreakpointStatus( pending, setBreakpoint( pending ) );
 			}
 		}
 	}
@@ -2487,10 +2476,29 @@ public class VMController {
 	 *
 	 * @return The generated Breakpoint object
 	 */
-	public Breakpoint trackSourceBreakpoint( Source source, SourceBreakpoint sourceBreakpoint ) {
+	public synchronized List<Breakpoint> replaceSourceBreakpoints( Source source, SourceBreakpoint[] breakpoints ) {
+		if ( source == null || source.getPath() == null || source.getPath().isBlank() ) {
+			throw new IllegalArgumentException( "A source path is required for breakpoints" );
+		}
+		List<SourceBreakpoint>	requested	= breakpoints == null ? List.of() : java.util.Arrays.asList( breakpoints );
+		List<PendingBreakpoint>	existing	= getPendingBreakpointsForFile( source.getPath() );
+		if ( !existing.stream().map( PendingBreakpoint::getSourceBreakpoint ).toList().equals( requested ) ) {
+			clearPendingBreakpointsForFile( source.getPath() );
+			for ( SourceBreakpoint breakpoint : requested ) {
+				trackSourceBreakpoint( source, breakpoint );
+			}
+		}
+		verifyAndSetPendingBreakpoints();
+		return getPendingBreakpointsForFile( source.getPath() ).stream().map( PendingBreakpoint::getBreakpoint ).toList();
+	}
+
+	public synchronized Breakpoint trackSourceBreakpoint( Source source, SourceBreakpoint sourceBreakpoint ) {
 		// Create the breakpoint with generated ID and initial state
 		Breakpoint breakpoint = new Breakpoint();
 		breakpoint.setId( generateBreakpointId() );
+		Source responseSource = new Source();
+		responseSource.setPath( pathMappingService == null ? source.getPath() : pathMappingService.toLocalPath( source.getPath() ) );
+		breakpoint.setSource( responseSource );
 		breakpoint.setLine( sourceBreakpoint.getLine() );
 		breakpoint.setVerified( false ); // Mark as unverified until program starts
 		breakpoint.setMessage( "Breakpoint will be verified when program starts" );
@@ -2512,9 +2520,11 @@ public class VMController {
 			return "";
 		}
 
-		// Convert to absolute path and normalize separators
-		Path path = Paths.get( filePath ).toAbsolutePath().normalize();
-		return path.toString().replace( '\\', '/' );
+		String path = PathMappingService.normalizePath( filePath );
+		if ( !BoxLangStackFrame.isAbsoluteSourcePath( path ) ) {
+			path = PathMappingService.normalizePath( Paths.get( path ).toAbsolutePath().toString() );
+		}
+		return path.matches( "^[A-Za-z]:/.*" ) || path.startsWith( "//" ) ? path.toLowerCase( java.util.Locale.ROOT ) : path;
 	}
 
 	/**
@@ -2617,61 +2627,16 @@ public class VMController {
 	 * Resume execution for the specified thread (called when continue is requested)
 	 */
 	public void continueExecution( int threadId ) {
-		if ( vm == null ) {
-			LOGGER.warning( "Virtual machine not available for continue" );
-			return;
-		}
-
-		try {
-			if ( eventSets.containsKey( ( long ) threadId ) ) {
-				EventSet eventSet = eventSets.remove( ( long ) threadId );
-				eventSet.resume();
-				LOGGER.info( "Resumed thread " + threadId + " via stored event set" );
-				return;
-			}
-			// Find the thread by ID
-			ThreadReference targetThread = null;
-			for ( ThreadReference thread : vm.allThreads() ) {
-				if ( thread.uniqueID() == threadId ) {
-					targetThread = thread;
-					break;
-				}
-			}
-
-			if ( targetThread == null ) {
-				LOGGER.warning( "Thread not found with ID: " + threadId );
-				return;
-			}
-
-			// Resume the thread if it's suspended
-			if ( targetThread.isSuspended() ) {
-				targetThread.resume();
-				LOGGER.info( "Resumed thread " + threadId );
-			} else {
-				LOGGER.info( "Thread " + threadId + " is not suspended, no action needed" );
-			}
-
-		} catch ( Exception e ) {
-			LOGGER.severe( "Error resuming thread " + threadId + ": " + e.getMessage() );
-			e.printStackTrace();
-		}
+		continueExecution( getBreakpointContextByThread( threadId )
+		    .orElseThrow( () -> new IllegalArgumentException( "Thread is not stopped: " + threadId ) ) );
 	}
 
 	/**
 	 * Resume execution for all threads (called when continue is requested without specific thread)
 	 */
 	public void continueAllExecution() {
-		if ( vm == null ) {
-			LOGGER.warning( "Virtual machine not available for continue" );
-			return;
-		}
-
-		try {
-			vm.resume();
-			LOGGER.info( "Resumed all threads" );
-		} catch ( Exception e ) {
-			LOGGER.severe( "Error resuming all threads: " + e.getMessage() );
-			e.printStackTrace();
+		synchronized ( stopLock ) {
+			resumeStops( new ArrayList<>( breakPointContexts.values() ), true );
 		}
 	}
 

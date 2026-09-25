@@ -15,8 +15,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
-import org.eclipse.lsp4j.debug.launch.DSPLauncher;
-import org.eclipse.lsp4j.debug.services.IDebugProtocolClient;
+import org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 
 public class BoxDebugger {
@@ -145,14 +144,14 @@ public class BoxDebugger {
 	}
 
 	private static void handleClient( SocketChannel clientSocket ) {
+		BoxDebugServer debugServer = new BoxDebugServer();
 		try {
 			LOGGER.info( "Creating debug server instance..." );
 			// Create the debug server instance
-			BoxDebugServer debugServer = new BoxDebugServer();
 			LOGGER.info( "Debug server instance created successfully" );
 			LOGGER.info( "Client socket open: " + clientSocket.isOpen() + ", connected: " + clientSocket.isConnected() );
 
-			Launcher<IDebugProtocolClient> launcher = null;
+			Launcher<IBoxLangDebugClient> launcher = null;
 
 			if ( System.getProperty( "teeDAPInput" ) != null ) {
 				String				timestamp		= new SimpleDateFormat( "yyyyMMdd-HHmmss" ).format( new Date() );
@@ -166,15 +165,17 @@ public class BoxDebugger {
 				);
 
 				// Create the LSP4J launcher for the debug adapter protocol
-				launcher = DSPLauncher.createServerLauncher(
+				launcher = DebugLauncher.createLauncher(
 				    debugServer,
+				    IBoxLangDebugClient.class,
 				    // clientSocket.socket().getInputStream(),
 				    teeInputStream,
 				    clientSocket.socket().getOutputStream() );
 			} else {
 				LOGGER.info( "Creating DSP launcher..." );
-				launcher = DSPLauncher.createServerLauncher(
+				launcher = DebugLauncher.createLauncher(
 				    debugServer,
+				    IBoxLangDebugClient.class,
 				    clientSocket.socket().getInputStream(),
 				    clientSocket.socket().getOutputStream() );
 			}
@@ -197,6 +198,7 @@ public class BoxDebugger {
 			}
 			e.printStackTrace();
 		} finally {
+			debugServer.cleanup();
 			try {
 				clientSocket.close();
 				LOGGER.info( "Client disconnected" );

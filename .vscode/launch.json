@@ -64,6 +64,14 @@
             "serverPort": 9888,
             "localRoot": "${workspaceFolder}/src/test/docker",
             "remoteRoot": "/app"
+        },
+        {
+            // use this with src\test\docker\docker-compose.yml
+            "name": "Debug Local BoxLang CommandBox Server",
+            "type": "boxlang",
+            "request": "attach",
+            "debugServer": 9898,
+            "serverPort": 10110
         }
     ],
     "compounds": [

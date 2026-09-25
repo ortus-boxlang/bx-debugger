@@ -21,6 +21,38 @@ import org.junit.jupiter.api.io.TempDir;
 @DisplayName( "PathMappingService Tests" )
 public class PathMappingServiceTest {
 
+	@Test
+	void pathMatchingNeverConfusesConflictingAbsolutePathsOrUnixCase() {
+		PathMappingService service = new PathMappingService( null, null, null );
+		assertFalse( service.pathsMatch( "/app/models/User.bx", "/models/User.bx" ) );
+		assertFalse( service.pathsMatch( "/app/User.bx", "/app/user.bx" ) );
+		assertTrue( service.pathsMatch( "C:/app/User.bx", "c:/APP/user.bx" ) );
+	}
+
+	@Test
+	void windowsPathsNormalizeBeforeMappingAcrossPlatforms() {
+		PathMappingService service = new PathMappingService( "C:/code/app", "/app", null );
+		assertEquals( "C:/code/other/test.bxs", service.toRemotePath( "C:\\code\\app\\..\\other\\test.bxs" ) );
+		assertTrue( PathMappingService.samePath( "//server/share/FILE.bxs", "//SERVER/share/file.bxs" ) );
+		assertFalse( PathMappingService.samePath( "/app/FILE.bxs", "/app/file.bxs" ) );
+	}
+
+	@Test
+	void mappingFilesystemRootsKeepsTheSeparator() {
+		PathMappingService service = new PathMappingService( "/", "/app", null );
+		assertEquals( "/app/test.bxs", service.toRemotePath( "/test.bxs" ) );
+		assertEquals( "/test.bxs", service.toLocalPath( "/app/test.bxs" ) );
+	}
+
+	@Test
+	void mappingRespectsDirectoryBoundariesAndRemoteCase() {
+		PathMappingService service = new PathMappingService( "C:/code/app", "/app", null );
+		assertEquals( "C:/code/application/test.bxs", service.toRemotePath( "C:/code/application/test.bxs" ) );
+		assertEquals( "/application/test.bxs", service.toLocalPath( "/application/test.bxs" ) );
+		assertEquals( "/APP/test.bxs", service.toLocalPath( "/APP/test.bxs" ) );
+		assertEquals( "/app/test.bxs", service.toRemotePath( "c:/CODE/App/test.bxs" ) );
+	}
+
 	@Nested
 	@DisplayName( "Explicit Mapping Tests" )
 	class ExplicitMappingTests {
@@ -187,16 +219,16 @@ public class PathMappingServiceTest {
 		}
 
 		@Test
-		@DisplayName( "Should match when one path is suffix of another" )
+		@DisplayName( "Should not infer source identity from a basename or relative suffix" )
 		void testSuffixMatching() {
 			PathMappingService service = new PathMappingService( null, null, null );
 
 			// Filename-only match
-			assertTrue( service.pathsMatch( "User.bx", "/app/models/User.bx" ) );
-			assertTrue( service.pathsMatch( "/app/models/User.bx", "User.bx" ) );
+			assertFalse( service.pathsMatch( "User.bx", "/app/models/User.bx" ) );
+			assertFalse( service.pathsMatch( "/app/models/User.bx", "User.bx" ) );
 
 			// Relative path suffix match
-			assertTrue( service.pathsMatch( "models/User.bx", "/app/models/User.bx" ) );
+			assertFalse( service.pathsMatch( "models/User.bx", "/app/models/User.bx" ) );
 		}
 
 		@Test

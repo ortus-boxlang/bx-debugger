@@ -1,0 +1,3 @@
+probe = new Ticket01Frames();
+probe.outer(); // Bootstrap breakpoint: the CFC is loaded before its breakpoint is installed.
+sleep( 30000 ); // Keep the VM alive for stale-frame evaluation after continue.

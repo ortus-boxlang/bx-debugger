@@ -1,5 +1,8 @@
 package ortus.boxlang.bxdebugger;
 
+import java.util.Locale;
+
+import org.eclipse.lsp4j.debug.Source;
 import org.eclipse.lsp4j.debug.StackFrame;
 
 /**
@@ -50,11 +53,23 @@ public class BoxLangStackFrame extends StackFrame {
 			setName( javaFrame.getName() );
 			setLine( javaFrame.getLine() );
 			setColumn( javaFrame.getColumn() );
-			setSource( javaFrame.getSource() );
-			// the name and path values are flipped for some reason
-			// so we set the path to the name
 			if ( javaFrame.getSource() != null ) {
-				getSource().setPath( javaFrame.getSource().getName() );
+				Source	original	= javaFrame.getSource();
+				Source	source		= new Source();
+				source.setName( original.getName() );
+				String path = original.getPath();
+				// JDI can prefix the generated package to an absolute SourceFile name.
+				if ( path == null || path.isBlank() || ( !isAbsoluteSourcePath( path ) && isAbsoluteSourcePath( original.getName() ) ) ) {
+					path = original.getName();
+				}
+				source.setPath( path );
+				source.setSourceReference( original.getSourceReference() );
+				source.setPresentationHint( original.getPresentationHint() );
+				source.setOrigin( original.getOrigin() );
+				source.setSources( original.getSources() );
+				source.setAdapterData( original.getAdapterData() );
+				source.setChecksums( original.getChecksums() );
+				setSource( source );
 			}
 			setEndLine( javaFrame.getEndLine() );
 			setEndColumn( javaFrame.getEndColumn() );
@@ -134,8 +149,10 @@ public class BoxLangStackFrame extends StackFrame {
 			return false;
 		}
 
+		sourcePath = sourcePath.toLowerCase( Locale.ROOT );
 		// Check for BoxLang file extensions
-		return sourcePath.endsWith( ".bx" ) ||
+		return sourcePath.endsWith( ".cfc" ) ||
+		    sourcePath.endsWith( ".bx" ) ||
 		    sourcePath.endsWith( ".bxs" ) ||
 		    sourcePath.endsWith( ".bxm" ) ||
 		    sourcePath.endsWith( ".cf" ) ||
@@ -153,8 +170,16 @@ public class BoxLangStackFrame extends StackFrame {
 	 */
 	public static BoxLangStackFrame fromJavaFrame( StackFrame javaFrame ) {
 		BoxLangStackFrame boxFrame = new BoxLangStackFrame( javaFrame );
-		boxFrame.setBoxLangFrame( isBoxLangSourceFrame( javaFrame ) );
+		boxFrame.setBoxLangFrame( isBoxLangSourceFrame( boxFrame ) );
 		return boxFrame;
+	}
+
+	static boolean isAbsoluteSourcePath( String path ) {
+		if ( path == null ) {
+			return false;
+		}
+		String normalized = path.replace( '\\', '/' );
+		return normalized.startsWith( "/" ) || normalized.matches( "^[A-Za-z]:/.*" );
 	}
 
 	@Override

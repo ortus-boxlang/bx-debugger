@@ -10,9 +10,9 @@ import java.util.function.BiConsumer;
 
 import org.eclipse.lsp4j.debug.Scope;
 import org.eclipse.lsp4j.debug.ScopesResponse;
-import org.eclipse.lsp4j.debug.launch.DSPLauncher;
 import org.eclipse.lsp4j.debug.services.IDebugProtocolServer;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
+import org.eclipse.lsp4j.jsonrpc.debug.DebugLauncher;
 
 public class DebugServerTestUtils {
 
@@ -49,10 +49,11 @@ public class DebugServerTestUtils {
 			clientSocket.connect( new InetSocketAddress( "localhost", port ) );
 			assertTrue( clientSocket.isConnected(), "Should be connected to debug server" );
 
-			// Create the DAP client
+			// Create the DAP client using DebugLauncher so custom events are routed correctly
 			TestDebugClient					testClient	= new TestDebugClient();
-			Launcher<IDebugProtocolServer>	launcher	= DSPLauncher.createClientLauncher(
+			Launcher<IDebugProtocolServer>	launcher	= DebugLauncher.createLauncher(
 			    testClient,
+			    IDebugProtocolServer.class,
 			    clientSocket.socket().getInputStream(),
 			    clientSocket.socket().getOutputStream()
 			);

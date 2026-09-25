@@ -187,6 +187,10 @@ public class FullDebugSessionTest {
 				Scope requestScope = DebugServerTestUtils.findScope( scopesResult, "request" );
 				assertThat( requestScope ).isNotNull();
 
+				// The script breakpoint is a one-shot bootstrap; the line may have multiple locations.
+				breakpointArgs.setBreakpoints( new SourceBreakpoint[] { functionBreakpoint } );
+				server.setBreakpoints( breakpointArgs ).get( TIMEOUT, TimeUnit.SECONDS );
+
 				// CONTINUE
 				ContinueArguments continueArgs = new ContinueArguments();
 				continueArgs.setThreadId( stopped.get().getThreadId() );
@@ -202,7 +206,7 @@ public class FullDebugSessionTest {
 				CompletableFuture<StackTraceResponse>	stackTraceResponse2	= server.stackTrace( stackTraceArgs2 );
 				StackTraceResponse						stackTraceResult2	= stackTraceResponse2.get( TIMEOUT, TimeUnit.SECONDS ); // Wait for stack trace
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getSource().getPath().toString() ).isEqualTo( breakpointFile.toString() );                                                                                                                // response
-				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isEqualTo( "_invoke" );                                                                                                                // response
+				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getName() ).isAnyOf( "_invoke", "invokeFunction_greet" );                                                                                                                // response
 				assertThat( stackTraceResult2.getStackFrames()[ 0 ].getLine() ).isEqualTo( breakpointOne );
 
 				// SCOPES

@@ -1,9 +1,6 @@
 package ortus.boxlang.bxdebugger.vm;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Map;
@@ -11,7 +8,6 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.sun.jdi.Bootstrap;
 import com.sun.jdi.VirtualMachine;
 import com.sun.tools.attach.AttachNotSupportedException;
 
@@ -29,28 +25,12 @@ public class CommandBoxConnection implements IVMConnection {
 	private record CommandBoxServerInfo( String host, Integer port, Long pid ) {
 	}
 
-	/**
-	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
-	 *
-	 * @param message The error message to log
-	 */
-	private static void fatalError( String message ) {
-		LOGGER.severe( "FATAL: " + message );
-		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
-		System.exit( 1 );
-	}
-
 	public CommandBoxConnection( String serverName ) throws Exception {
 		this.serverName	= serverName;
 		this.serverInfo	= parseCommandBoxServerInfo( serverName );
-		this.vm			= attachToVM( serverInfo.host, serverInfo.port );
-
-		// BoxLang now starts the DebuggerUtil automatically when debugMode=true
-		// Verify it's running - this is required for the debugger to function
-		if ( !IVMConnection.isDebuggerUtilStarted( this.vm ) ) {
-			fatalError( "DebuggerUtil not detected" );
-		}
+		if ( serverInfo.port == null )
+			throw new IOException( "CommandBox server has no JDWP port" );
+		this.vm = new BareJDWPConnection( serverInfo.host, serverInfo.port ).getVirtualMachine();
 	}
 
 	@Override
@@ -68,64 +48,44 @@ public class CommandBoxConnection implements IVMConnection {
 		return attachVm;
 	}
 
-	private VirtualMachine attachToVM( String hostname, int port ) throws Exception {
-
-		// Find socket attaching connector
-		com.sun.jdi.connect.AttachingConnector				connector	= Bootstrap.virtualMachineManager()
-		    .attachingConnectors()
-		    .stream()
-		    .filter( c -> "com.sun.jdi.SocketAttach".equals( c.name() ) )
-		    .findFirst()
-		    .orElseThrow( () -> new RuntimeException( "SocketAttach connector not found" ) );
-
-		Map<String, com.sun.jdi.connect.Connector.Argument>	cArgs		= connector.defaultArguments();
-		cArgs.get( "hostname" ).setValue( hostname );
-		cArgs.get( "port" ).setValue( String.valueOf( port ) );
-
-		final int	maxAttempts	= 8;
-		int			attempt		= 1;
-		while ( true ) {
-			try {
-				VirtualMachine vm = connector.attach( cArgs );
-				LOGGER.info( "Attached to target VM at " + hostname + ":" + port );
-
-				return vm;
-			} catch ( Exception ex ) {
-				if ( attempt >= maxAttempts ) {
-					throw new RuntimeException( ex );
-				}
-				try {
-					Thread.sleep( 200L * attempt );
-				} catch ( InterruptedException ie ) {
-					Thread.currentThread().interrupt();
-					throw new RuntimeException( ex );
-				}
-				attempt++;
-			}
-		}
-	}
-
 	private CommandBoxServerInfo parseCommandBoxServerInfo( String serverName ) throws IOException {
 		ProcessBuilder pb = new ProcessBuilder( "box", "server", "info", serverName, "--json" );
 		pb.redirectErrorStream( true );
-		StringBuilder jsonOut = new StringBuilder();
+		java.nio.file.Path	output	= Files.createTempFile( "bx-commandbox-info-", ".json" );
+		Process				process	= null;
+		String				json;
 		try {
-			Process p = pb.start();
-			try ( BufferedReader r = new BufferedReader( new InputStreamReader( p.getInputStream(), StandardCharsets.UTF_8 ) ) ) {
-				String line;
-				while ( ( line = r.readLine() ) != null ) {
-					jsonOut.append( line );
+			process = pb.redirectOutput( output.toFile() ).start();
+			if ( !process.waitFor( 10, java.util.concurrent.TimeUnit.SECONDS ) ) {
+				throw new IOException( "CommandBox discovery timed out after 10 seconds" );
+			}
+			if ( process.exitValue() != 0 )
+				throw new IOException( "CommandBox discovery failed: " + Files.readString( output ) );
+			json = Files.readString( output );
+		} catch ( InterruptedException e ) {
+			Thread.currentThread().interrupt();
+			throw new IOException( "CommandBox discovery interrupted", e );
+		} finally {
+			if ( process != null && process.isAlive() ) {
+				process.descendants().forEach( ProcessHandle::destroyForcibly );
+				process.destroyForcibly();
+			}
+			if ( process != null ) {
+				try {
+					process.waitFor( 2, java.util.concurrent.TimeUnit.SECONDS );
+				} catch ( InterruptedException interrupted ) {
+					Thread.currentThread().interrupt();
 				}
 			}
-			int exit = p.waitFor();
-			if ( exit != 0 ) {
-				throw new IOException( "CommandBox server info command failed with exit code " + exit );
+			try {
+				Files.deleteIfExists( output );
+			} catch ( IOException cleanupFailure ) {
+				LOGGER.fine( "Discovery output still in use: " + cleanupFailure.getMessage() );
+				output.toFile().deleteOnExit();
 			}
-		} catch ( Exception e ) {
-			throw new IOException( "Failed to retrieve CommandBox server info: " + e.getMessage(), e );
 		}
 
-		Map<String, Object>	infoData	= ( Map ) JSONUtil.fromJSON( jsonOut.toString().trim() );
+		Map<String, Object>	infoData	= ( Map ) JSONUtil.fromJSON( json.trim() );
 
 		Long				pid			= getPID( ( String ) infoData.get( "pidfile" ) );
 		Integer				port		= getPort( ( String ) infoData.get( "JVMargs" ) );

@@ -1,0 +1,12 @@
+function run() {
+    var myStruct = {
+        name: "BoxLang",
+        version: "1.0"
+    };
+
+    var trivial = "hello";
+    return trivial;
+}
+
+println( run() );
+

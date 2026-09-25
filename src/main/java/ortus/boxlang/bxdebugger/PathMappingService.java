@@ -77,9 +77,9 @@ public class PathMappingService {
 
 		// If we have an explicit mapping, use it
 		if ( hasExplicitMapping ) {
-			if ( startsWithIgnoreCase( normalizedLocal, localRoot ) ) {
+			if ( isUnderRoot( normalizedLocal, localRoot ) ) {
 				String	relativePath	= normalizedLocal.substring( localRoot.length() );
-				String	remotePath		= remoteRoot + relativePath;
+				String	remotePath		= joinRoot( remoteRoot, relativePath );
 				LOGGER.fine( "Translated local->remote: " + localPath + " -> " + remotePath );
 				return remotePath;
 			}
@@ -105,9 +105,9 @@ public class PathMappingService {
 
 		// If we have an explicit mapping, use it
 		if ( hasExplicitMapping ) {
-			if ( startsWithIgnoreCase( normalizedRemote, remoteRoot ) ) {
+			if ( isUnderRoot( normalizedRemote, remoteRoot ) ) {
 				String	relativePath	= normalizedRemote.substring( remoteRoot.length() );
-				String	localPath		= localRoot + relativePath;
+				String	localPath		= joinRoot( localRoot, relativePath );
 				LOGGER.fine( "Translated remote->local: " + remotePath + " -> " + localPath );
 				return localPath;
 			}
@@ -174,7 +174,8 @@ public class PathMappingService {
 
 	/**
 	 * Check if two paths refer to the same file, accounting for path mapping.
-	 * This normalizes both paths and compares them case-insensitively.
+	 * Compare normalized identities using explicit root mappings and filesystem case semantics.
+	 * Basename/suffix heuristics cannot establish source identity.
 	 *
 	 * @param path1 First path (can be local or remote)
 	 * @param path2 Second path (can be local or remote)
@@ -186,50 +187,7 @@ public class PathMappingService {
 			return false;
 		}
 
-		String	normalized1	= normalizePath( path1 );
-		String	normalized2	= normalizePath( path2 );
-
-		// Direct match
-		if ( normalized1.equalsIgnoreCase( normalized2 ) ) {
-			return true;
-		}
-
-		// Try translating path1 to remote and compare
-		String path1AsRemote = toRemotePath( path1 );
-		if ( path1AsRemote.equalsIgnoreCase( normalized2 ) ) {
-			return true;
-		}
-
-		// Try translating path2 to remote and compare
-		String path2AsRemote = toRemotePath( path2 );
-		if ( normalized1.equalsIgnoreCase( path2AsRemote ) ) {
-			return true;
-		}
-
-		// Try translating path1 to local and compare
-		String path1AsLocal = toLocalPath( path1 );
-		if ( path1AsLocal.equalsIgnoreCase( normalized2 ) ) {
-			return true;
-		}
-
-		// Try translating path2 to local and compare
-		String path2AsLocal = toLocalPath( path2 );
-		if ( normalized1.equalsIgnoreCase( path2AsLocal ) ) {
-			return true;
-		}
-
-		// Check if filenames match (for partial path comparisons like JDI sourceName)
-		String	fileName1	= getFileName( normalized1 );
-		String	fileName2	= getFileName( normalized2 );
-		if ( fileName1 != null && fileName2 != null && fileName1.equalsIgnoreCase( fileName2 ) ) {
-			// Filenames match - check if one is a suffix of the other
-			if ( normalized1.toLowerCase().endsWith( normalized2.toLowerCase() ) ||
-			    normalized2.toLowerCase().endsWith( normalized1.toLowerCase() ) ) {
-				return true;
-			}
-		}
-
-		return false;
+		return samePath( path1, path2 ) || samePath( toRemotePath( path1 ), toRemotePath( path2 ) );
 	}
 
 	/**
@@ -265,7 +223,8 @@ public class PathMappingService {
 			return "";
 		}
 
-		String	normalized						= path;
+		String	normalized						= path.replace( '\\', '/' );
+		boolean	unc								= normalized.startsWith( "//" );
 
 		// Check if this looks like a Windows absolute path (e.g., "C:/code" or "C:\code")
 		boolean	looksLikeWindowsAbsolutePath	= path.length() >= 2 &&
@@ -277,7 +236,7 @@ public class PathMappingService {
 		boolean	isWindows						= System.getProperty( "os.name" ).toLowerCase().contains( "win" );
 
 		try {
-			Path p = Paths.get( path );
+			Path p = Paths.get( normalized );
 			// Only convert to absolute if it's truly absolute on this OS
 			// (avoid prepending current directory to Windows paths on non-Windows systems)
 			if ( p.isAbsolute() && ( isWindows || !looksLikeWindowsAbsolutePath ) ) {
@@ -292,6 +251,9 @@ public class PathMappingService {
 
 		// Replace backslashes with forward slashes
 		normalized = normalized.replace( '\\', '/' );
+		if ( unc && !normalized.startsWith( "//" ) ) {
+			normalized = "/" + normalized;
+		}
 
 		// Remove trailing slash
 		while ( normalized.length() > 1 && normalized.endsWith( "/" ) ) {
@@ -302,18 +264,27 @@ public class PathMappingService {
 	}
 
 	/**
-	 * Case-insensitive check if a string starts with a prefix.
-	 *
-	 * @param str    The string to check
-	 * @param prefix The prefix to look for
-	 *
-	 * @return true if str starts with prefix (case-insensitive)
+	 * Join a mapped root to a relative suffix without dropping or duplicating separators.
 	 */
-	private boolean startsWithIgnoreCase( String str, String prefix ) {
-		if ( str == null || prefix == null ) {
+	private String joinRoot( String root, String relative ) {
+		if ( relative.isEmpty() )
+			return root;
+		return root.replaceAll( "/+$", "" ) + "/" + relative.replaceFirst( "^/", "" );
+	}
+
+	private boolean isUnderRoot( String path, String root ) {
+		if ( root.isEmpty() || path.length() < root.length() ) {
 			return false;
 		}
-		return str.toLowerCase().startsWith( prefix.toLowerCase() );
+		return samePath( path.substring( 0, root.length() ), root )
+		    && ( path.length() == root.length() || root.endsWith( "/" ) || path.charAt( root.length() ) == '/' );
+	}
+
+	public static boolean samePath( String first, String second ) {
+		String	a		= normalizePath( first );
+		String	b		= normalizePath( second );
+		boolean	windows	= a.matches( "^[A-Za-z]:/.*" ) || a.startsWith( "//" );
+		return windows ? a.equalsIgnoreCase( b ) : a.equals( b );
 	}
 
 	/**

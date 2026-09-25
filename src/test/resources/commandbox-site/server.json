@@ -6,6 +6,9 @@
         "javaVersion":"openjdk21",
         "args":"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=10110"
     },
+    "env":{
+        "BOXLANG_DEBUG":"true"
+    },
     "web":{
         "bindings":{
             "HTTP":{

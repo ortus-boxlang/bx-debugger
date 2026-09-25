@@ -3,6 +3,9 @@ package ortus.boxlang.bxdebugger;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeoutException;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.sun.jdi.ArrayReference;
@@ -21,25 +24,50 @@ import com.sun.jdi.Value;
 
 public class InvokeTools {
 
-	private static final Logger							LOGGER		= Logger.getLogger( VariableManager.class.getName() );
+	private static final Logger							LOGGER		= Logger.getLogger( InvokeTools.class.getName() );
 	public static CompletableFuture<ThreadReference>	debugThread	= new CompletableFuture<>();
 
-	private static final Object							invokeLock	= new Object();
-
 	/**
-	 * Fatal error that terminates the debugger.
-	 * Called when the DebuggerUtil is not available, which is a non-recoverable state.
+	 * Fail the invocation when DebuggerUtil is unavailable without terminating the adapter.
 	 *
 	 * @param message The error message to log
 	 */
 	private static void fatalError( String message ) {
 		LOGGER.severe( "FATAL: " + message );
 		LOGGER.severe( "The debugger cannot function without the DebuggerUtil. Ensure BoxLang is started with debugMode=true" );
-		System.exit( 1 );
+		throw new IllegalStateException( message );
+	}
+
+	private static final class Pins {
+
+		private final java.util.List<ObjectReference>	values	= new java.util.ArrayList<>();
+		private boolean									closed;
+
+		synchronized <T extends ObjectReference> T keep( T value ) {
+			if ( closed )
+				throw new IllegalStateException( "Invocation has ended" );
+			value.disableCollection();
+			values.add( value );
+			return value;
+		}
+
+		synchronized void close() {
+			if ( closed )
+				return;
+			closed = true;
+			for ( ObjectReference value : values ) {
+				try {
+					value.enableCollection();
+				} catch ( RuntimeException error ) {
+					LOGGER.fine( "Unable to release invocation value: " + error );
+				}
+			}
+			values.clear();
+		}
 	}
 
 	public static ObjectReference createIntegerRef( VMController vmController, int value ) {
-		synchronized ( invokeLock ) {
+		synchronized ( vmController.invocationLock ) {
 			ClassType	integerClass	= ( ClassType ) vmController.vm.classesByName( "java.lang.Integer" ).get( 0 );
 			Method		valueOfMethod	= null;
 			for ( Method m : integerClass.methodsByName( "valueOf" ) ) {
@@ -62,59 +90,54 @@ public class InvokeTools {
 				    ObjectReference.INVOKE_SINGLE_THREADED
 				);
 			} catch ( Exception e ) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-
-				return null;
+				throw new CompletionException( e );
 			}
-			// boxedInt is an ObjectReference (java.lang.Integer) on success
+			vmController.retainInvocationResult( boxedInt );
 			return ( ObjectReference ) boxedInt;
 		}
 	}
 
-	// TODO probably want to change this to just directly use the signature to find the method
-	public static CompletableFuture<Value> submitAndInvokeStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames,
+	public static CompletableFuture<Value> submitAndInvokeStatic( VMController controller, String target, String method, List<String> types,
 	    List<Value> args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			synchronized ( invokeLock ) {
-				try {
-					String taskId = enqueueStatic( vmController, target, methodName, paramTypeNames, args );
-					if ( taskId == null ) {
-						LOGGER.severe( "Failed to enqueue static invocation: " + target + "." + methodName );
-						return null;
-					}
-					return pollForResult( vmController, taskId );
-				} catch ( Exception e ) {
-					LOGGER.severe( "Error during submitAndInvokeStatic: " + e.getMessage() );
-				}
-
-				return null;
-			}
-		} );
+		return submit( controller, null, target, method, types, args );
 	}
 
-	// TODO probably want to change this to just directly use the signature to find the method
-	public static CompletableFuture<Value> submitAndInvoke( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
+	public static CompletableFuture<Value> submitAndInvoke( VMController controller, ObjectReference target, String method, List<String> types,
 	    List<Value> args ) {
-		return CompletableFuture.supplyAsync( () -> {
-			synchronized ( invokeLock ) {
-				try {
-					String taskId = enqueueOnObject( vmController, target, methodName, paramTypeNames, args );
-					if ( taskId == null ) {
-						LOGGER.severe( "Failed to enqueue invocation: " + methodName );
-						return null;
-					}
-					return pollForResult( vmController, taskId );
-				} catch ( Exception e ) {
-					LOGGER.severe( "Error during submitAndInvoke: " + e.getMessage() );
-				}
-
-				return null;
-			}
-		} );
+		return submit( controller, target, null, method, types, args );
 	}
 
-	private static Value pollForResult( VMController vmController, String taskId ) {
+	private static CompletableFuture<Value> submit( VMController controller, ObjectReference target, String targetClass, String method, List<String> types,
+	    List<Value> args ) {
+		Pins pins = new Pins();
+		try {
+			// Retain inputs before queuing: a JDI mirror alone is not a target-side GC root.
+			if ( target != null )
+				pins.keep( target );
+			for ( Value argument : args )
+				if ( argument instanceof ObjectReference object )
+					pins.keep( object );
+			return controller.submitInvocation( () -> {
+				synchronized ( controller.invocationLock ) {
+					try {
+						StringReference task = targetClass == null
+						    ? enqueueOnObject( controller, target, method, types, args, pins )
+						    : enqueueStatic( controller, targetClass, method, types, args, pins );
+						return pollForResult( controller, task, pins );
+					} catch ( Exception error ) {
+						LOGGER.log( Level.SEVERE, "Helper invocation failed: " + ( targetClass == null ? method : targetClass + "." + method ), error );
+						throw error instanceof CompletionException completion ? completion : new CompletionException( error );
+					}
+				}
+			} ).whenComplete( ( value, error ) -> pins.close() );
+		} catch ( Exception error ) {
+			LOGGER.log( Level.SEVERE, "Unable to retain invocation arguments: " + method, error );
+			pins.close();
+			return CompletableFuture.failedFuture( error );
+		}
+	}
+
+	private static Value pollForResult( VMController vmController, StringReference taskId, Pins pins ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
 			fatalError( "DebuggerUtil class not found during pollForResult" );
@@ -130,33 +153,51 @@ public class InvokeTools {
 		try {
 			int		timeoutLoop	= 100;
 
-			Method	pollMethod	= helperClass.methodsByName( "pollResult" ).get( 0 );
+			Method	pollMethod	= helperClass.methodsByName( "peekResult" ).get( 0 );
 			Value	res			= null;
 			for ( int i = 0; i < timeoutLoop; ++i ) {
 				res = helperClass.invokeMethod( debugThread, pollMethod,
-				    Collections.singletonList( vmController.vm.mirrorOf( taskId ) ),
+				    Collections.singletonList( taskId ),
 				    ObjectReference.INVOKE_SINGLE_THREADED );
 				if ( res != null ) {
-					return findValueOfPropertyByName( ( ObjectReference ) res, "value" );
+					// Peek keeps the result rooted in the runtime until we can pin and transfer ownership.
+					ObjectReference result = pins.keep( ( ObjectReference ) res );
+					helperClass.invokeMethod( debugThread, helperClass.methodsByName( "pollResult" ).get( 0 ), List.of( taskId ),
+					    ObjectReference.INVOKE_SINGLE_THREADED );
+					vmController.retainInvocationResult( result );
+					Value failure = findValueOfPropertyByName( result, "exception" );
+					if ( failure instanceof ObjectReference exception ) {
+						var				messages	= new java.util.StringJoiner( ": " );
+						var				seen		= new java.util.HashSet<Long>();
+						ObjectReference	current		= exception;
+						while ( seen.add( current.uniqueID() ) ) {
+							String	type	= current.referenceType().name();
+							Value	detail	= findValueOfPropertyByName( current, "detailMessage" );
+							messages.add( type + ( detail instanceof StringReference text ? ": " + text.value() : "" ) );
+							Value cause = findValueOfPropertyByName( current,
+							    type.equals( "java.lang.reflect.InvocationTargetException" ) ? "target" : "cause" );
+							if ( ! ( cause instanceof ObjectReference next ) )
+								break;
+							current = next;
+						}
+						throw new IllegalStateException( "Target evaluation failed: " + messages, new InvocationException( exception ) );
+					}
+					return findValueOfPropertyByName( result, "value" );
 				}
 				Thread.sleep( 50 );
 			}
-			LOGGER.warning( "pollForResult timed out after " + ( timeoutLoop * 50 ) + "ms for taskId: " + taskId );
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during pollForResult: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during pollForResult: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during pollForResult: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during pollForResult: " + e.getMessage() );
+			throw new CompletionException(
+			    new TimeoutException( "pollForResult timed out after " + ( timeoutLoop * 50 ) + "ms for taskId: " + taskId.value() ) );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		} catch ( InterruptedException e ) {
-			LOGGER.severe( "Interrupted during pollForResult: " + e.getMessage() );
+			Thread.currentThread().interrupt();
+			throw new CompletionException( e );
 		}
-		return null;
 	}
 
-	private static String enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args ) {
+	private static StringReference enqueueStatic( VMController vmController, String target, String methodName, List<String> paramTypeNames, List<Value> args,
+	    Pins pins ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
 			fatalError( "DebuggerUtil class not found for enqueueStatic" );
@@ -169,9 +210,9 @@ public class InvokeTools {
 			return null; // Unreachable, but satisfies compiler
 		}
 
-		List<Value> taskArgs = List.of( vmController.vm.mirrorOf( target ), vmController.vm.mirrorOf( methodName ),
-		    convertToMirrorStringArray( vmController, paramTypeNames ),
-		    convertToMirrorObjectArray( vmController, args ) );
+		List<Value> taskArgs = List.of( pins.keep( vmController.vm.mirrorOf( target ) ), pins.keep( vmController.vm.mirrorOf( methodName ) ),
+		    convertToMirrorStringArray( vmController, paramTypeNames, pins ),
+		    convertToMirrorObjectArray( vmController, args, pins ) );
 
 		try {
 			Value taskIdVal = helperClass.invokeMethod(
@@ -181,22 +222,14 @@ public class InvokeTools {
 			    ObjectReference.INVOKE_SINGLE_THREADED
 			);
 
-			return ( ( StringReference ) taskIdVal ).value();
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during enqueueStatic: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during enqueueStatic: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during enqueueStatic: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during enqueueStatic: " + e.getMessage() );
+			return pins.keep( ( StringReference ) taskIdVal );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		}
-
-		return null;
 	}
 
-	private static String enqueueOnObject( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
-	    List<Value> args ) {
+	private static StringReference enqueueOnObject( VMController vmController, ObjectReference target, String methodName, List<String> paramTypeNames,
+	    List<Value> args, Pins pins ) {
 		ClassType helperClass = getHelperClass( vmController );
 		if ( helperClass == null ) {
 			fatalError( "DebuggerUtil class not found for enqueueOnObject" );
@@ -209,8 +242,9 @@ public class InvokeTools {
 			return null; // Unreachable, but satisfies compiler
 		}
 
-		List<Value> taskArgs = List.of( target, vmController.vm.mirrorOf( methodName ), convertToMirrorStringArray( vmController, paramTypeNames ),
-		    convertToMirrorObjectArray( vmController, args ) );
+		List<Value> taskArgs = List.of( target, pins.keep( vmController.vm.mirrorOf( methodName ) ),
+		    convertToMirrorStringArray( vmController, paramTypeNames, pins ),
+		    convertToMirrorObjectArray( vmController, args, pins ) );
 
 		try {
 			Value taskIdVal = helperClass.invokeMethod(
@@ -220,46 +254,34 @@ public class InvokeTools {
 			    ObjectReference.INVOKE_SINGLE_THREADED
 			);
 
-			return ( ( StringReference ) taskIdVal ).value();
-		} catch ( InvalidTypeException e ) {
-			LOGGER.severe( "Invalid type during enqueueOnObject: " + e.getMessage() );
-		} catch ( ClassNotLoadedException e ) {
-			LOGGER.severe( "Class not loaded during enqueueOnObject: " + e.getMessage() );
-		} catch ( IncompatibleThreadStateException e ) {
-			LOGGER.severe( "Incompatible thread state during enqueueOnObject: " + e.getMessage() );
-		} catch ( InvocationException e ) {
-			LOGGER.severe( "Invocation exception during enqueueOnObject: " + e.getMessage() );
+			return pins.keep( ( StringReference ) taskIdVal );
+		} catch ( InvalidTypeException | ClassNotLoadedException | IncompatibleThreadStateException | InvocationException e ) {
+			throw new CompletionException( e );
 		}
-
-		return null;
 	}
 
-	private static ArrayReference convertToMirrorStringArray( VMController vmController, List<String> strings ) {
+	private static ArrayReference convertToMirrorStringArray( VMController vmController, List<String> strings, Pins pins ) {
 		var	strArrayType	= ( ArrayType ) vmController.vm.classesByName( "java.lang.String[]" ).get( 0 );
-		var	typeArray		= strArrayType.newInstance( strings.size() );
+		var	typeArray		= pins.keep( strArrayType.newInstance( strings.size() ) );
 		for ( int i = 0; i < strings.size(); ++i ) {
 			try {
-				typeArray.setValue( i, vmController.vm.mirrorOf( strings.get( i ) ) );
-			} catch ( InvalidTypeException e ) {
-				LOGGER.severe( "Invalid type when converting to Value[]: " + e.getMessage() );
-			} catch ( ClassNotLoadedException e ) {
-				LOGGER.severe( "Class not loaded when converting to Value[]: " + e.getMessage() );
+				typeArray.setValue( i, pins.keep( vmController.vm.mirrorOf( strings.get( i ) ) ) );
+			} catch ( InvalidTypeException | ClassNotLoadedException e ) {
+				throw new CompletionException( e );
 			}
 		}
 
 		return typeArray;
 	}
 
-	private static ArrayReference convertToMirrorObjectArray( VMController vmController, List<Value> things ) {
+	private static ArrayReference convertToMirrorObjectArray( VMController vmController, List<Value> things, Pins pins ) {
 		var	strArrayType	= ( ArrayType ) vmController.vm.classesByName( "java.lang.Object[]" ).get( 0 );
-		var	typeArray		= strArrayType.newInstance( things.size() );
+		var	typeArray		= pins.keep( strArrayType.newInstance( things.size() ) );
 		for ( int i = 0; i < things.size(); ++i ) {
 			try {
 				typeArray.setValue( i, things.get( i ) );
-			} catch ( InvalidTypeException e ) {
-				LOGGER.severe( "Invalid type when converting to Object[]: " + e.getMessage() );
-			} catch ( ClassNotLoadedException e ) {
-				LOGGER.severe( "Class not loaded when converting to Object[]: " + e.getMessage() );
+			} catch ( InvalidTypeException | ClassNotLoadedException e ) {
+				throw new CompletionException( e );
 			}
 		}
 
