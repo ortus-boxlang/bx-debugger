@@ -100,7 +100,6 @@ class StoppedThreadStateTest {
 
 	@Test
 	void reverifyingBindingsDoesNotResetTheLogicalHitCount() throws Exception {
-		start();
 		ReferenceType type = mock( ReferenceType.class );
 		when( type.name() ).thenReturn( "boxgenerated.Test" );
 		Location location = mock( Location.class );
@@ -108,6 +107,7 @@ class StoppedThreadStateTest {
 		when( location.sourceName() ).thenReturn( "test.bxs" );
 		when( type.locationsOfLine( 10 ) ).thenReturn( List.of( location ) );
 		when( vm.allClasses() ).thenReturn( List.of( type ) );
+		start();
 		var source = new org.eclipse.lsp4j.debug.Source();
 		source.setPath( "/app/test.bxs" );
 		var line = new org.eclipse.lsp4j.debug.SourceBreakpoint();
