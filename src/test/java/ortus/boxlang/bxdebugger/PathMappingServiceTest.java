@@ -36,6 +36,15 @@ public class PathMappingServiceTest {
 	}
 
 	@Test
+	void mapsMissingSourceBelowExistingWindowsAliasRoot( @TempDir Path tempDir ) throws Exception {
+		Path				localRoot	= Files.createDirectory( tempDir.resolve( "editor" ) );
+		Path				remoteRoot	= Files.createDirectory( tempDir.resolve( "app" ) );
+		PathMappingService	service		= new PathMappingService( localRoot.toString(), remoteRoot.toString(), null );
+		assertEquals( PathMappingService.normalizePath( remoteRoot.resolve( "unsaved.bxs" ).toString() ),
+		    service.toRemotePath( localRoot.resolve( "unsaved.bxs" ).toString() ) );
+	}
+
+	@Test
 	void windowsPathsNormalizeBeforeMappingAcrossPlatforms() {
 		PathMappingService service = new PathMappingService( "C:/code/app", "/app", null );
 		assertEquals( "C:/code/other/test.bxs", service.toRemotePath( "C:\\code\\app\\..\\other\\test.bxs" ) );

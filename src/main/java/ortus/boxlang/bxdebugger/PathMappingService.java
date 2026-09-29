@@ -244,10 +244,15 @@ public class PathMappingService {
 			if ( p.isAbsolute() && ( isWindows || !looksLikeWindowsAbsolutePath ) ) {
 				p = p.toAbsolutePath().normalize();
 				// JDI may report a long Windows path while the client supplied its 8.3 alias.
-				if ( isWindows && Files.exists( p ) ) {
-					try {
-						p = p.toRealPath();
-					} catch ( IOException ignored ) {
+				if ( isWindows ) {
+					Path existing = p;
+					while ( existing != null && !Files.exists( existing ) )
+						existing = existing.getParent();
+					if ( existing != null ) {
+						try {
+							p = existing.toRealPath().resolve( existing.relativize( p ) );
+						} catch ( IOException ignored ) {
+						}
 					}
 				}
 				normalized = p.toString();

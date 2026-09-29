@@ -49,9 +49,11 @@ public class DumpEventTest {
 	}
 
 	@AfterEach
-	void tearDown() {
+	void tearDown() throws InterruptedException {
 		if ( debuggerThread != null && debuggerThread.isAlive() ) {
 			debuggerThread.interrupt();
+			debuggerThread.join( 5000 );
+			assertTrue( !debuggerThread.isAlive(), "Debugger server should stop before the next test" );
 		}
 	}
 
