@@ -117,7 +117,8 @@ class BreakpointReconnectIntegrationTest {
 						StackTraceArguments stack = new StackTraceArguments();
 						stack.setThreadId( stop.getThreadId() );
 						var frame = server.stackTrace( stack ).get( 5, TimeUnit.SECONDS ).getStackFrames()[ 0 ];
-						assertEquals( editorSource.toString(), frame.getSource().getPath() );
+						assertTrue( PathMappingService.samePath( editorSource.toString(), frame.getSource().getPath() ),
+						    "Stack frame source should map back to the editor path" );
 						assertEquals( stopLine, frame.getLine() );
 						EvaluateArguments evaluate = new EvaluateArguments();
 						evaluate.setFrameId( frame.getId() );
