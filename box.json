@@ -1,7 +1,7 @@
 {
 	"name": "bx-debugger",
 	"version": "@build.version@+@build.number@",
-	"location": "https://downloads.ortussolutions.com/ortussolutions/boxlang-modules/bx-debugger/@build.version@/bx-debugger-@build.version@.zip",
+	"location": "forgeboxstorage",
 	"author": "Ortus Solutions",
 	"homepage": "https://github.com/ortus-boxlang/bx-debugger",
 	"documentation": "https://github.com/ortus-boxlang/bx-debugger",
@@ -17,7 +17,7 @@
 		"boxlang"
 	],
 	"boxlang": {
-		"minimumVersion": "1.10.0",
+		"minimumVersion": "1.17.0",
 		"moduleName": "bx-debugger"
 	},
 	"private": false,
