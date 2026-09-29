@@ -17,6 +17,8 @@
  */
 package ortus.boxlang.bxdebugger;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.logging.Logger;
@@ -240,7 +242,15 @@ public class PathMappingService {
 			// Only convert to absolute if it's truly absolute on this OS
 			// (avoid prepending current directory to Windows paths on non-Windows systems)
 			if ( p.isAbsolute() && ( isWindows || !looksLikeWindowsAbsolutePath ) ) {
-				normalized = p.toAbsolutePath().normalize().toString();
+				p = p.toAbsolutePath().normalize();
+				// JDI may report a long Windows path while the client supplied its 8.3 alias.
+				if ( isWindows && Files.exists( p ) ) {
+					try {
+						p = p.toRealPath();
+					} catch ( IOException ignored ) {
+					}
+				}
+				normalized = p.toString();
 			} else {
 				// Just normalize the path without making it absolute
 				normalized = p.normalize().toString();

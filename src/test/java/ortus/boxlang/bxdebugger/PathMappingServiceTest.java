@@ -30,6 +30,12 @@ public class PathMappingServiceTest {
 	}
 
 	@Test
+	void existingWindowsPathAliasesMatchTheirRealPaths( @TempDir Path tempDir ) throws Exception {
+		Path source = Files.createFile( tempDir.resolve( "source.bxs" ) );
+		assertTrue( PathMappingService.samePath( source.toString(), source.toRealPath().toString() ) );
+	}
+
+	@Test
 	void windowsPathsNormalizeBeforeMappingAcrossPlatforms() {
 		PathMappingService service = new PathMappingService( "C:/code/app", "/app", null );
 		assertEquals( "C:/code/other/test.bxs", service.toRemotePath( "C:\\code\\app\\..\\other\\test.bxs" ) );
